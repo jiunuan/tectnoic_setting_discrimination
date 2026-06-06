@@ -1,0 +1,35 @@
+# ── 数据与模型权重（体量大，通过 Zenodo/figshare 提供，见 data/README.md）──
+data/**
+!data/README.md
+!data/.gitkeep
+# 保留各阶段空目录结构（占位）
+!data/**/.gitkeep
+
+# ── 模型权重 / 二进制产物 ──
+*.pth
+*.joblib
+*.npy
+*.npz
+*.pkl
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ── 前端（工作流设计器）──
+tools/geochem_workflow_designer/node_modules/
+tools/geochem_workflow_designer/dist/
+tools/geochem_workflow_designer/.vite/
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

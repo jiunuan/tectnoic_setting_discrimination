@@ -1,0 +1,73 @@
+{
+  "name": "basalt_kfold_vit_transformer",
+  "description": "在已经固定保留20%测试集的前提下，仅使用80%原始训练集执行5折交叉验证。每折独立完成按类别IQR、按类别MissForest、主量无水归一化、训练折分位数拟合和ViT-Transformer训练。",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "note",
+      "title": "输入：80%原始训练集",
+      "position": {
+        "x": 40,
+        "y": 100
+      },
+      "params": {
+        "content": "输入文件：\n{repo_root}\\data\\04_split\\01_basalt_number_year_train.csv\n\n该文件由 split_train_test.py 生成。固定保留的20%测试集不会进入5折训练。"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "note",
+      "title": "5折内部处理规则",
+      "position": {
+        "x": 340,
+        "y": 20
+      },
+      "params": {
+        "content": "每折重新执行：\n1. 4份作为折内训练集，1份作为验证集\n2. 仅用折内训练集按类别计算IQR并清洗，阈值=6\n3. 每个类别分别拟合MissForest\n4. 用对应类别插补器转换验证折\n5. 主量无水归一化\n6. 仅用折内训练集拟合分位数边界\n7. 训练主模型并验证\n\n默认5折，每折随机种子42和123，共10次训练。"
+      }
+    },
+    {
+      "id": "n3",
+      "type": "command_task",
+      "title": "运行5折 ViT-Transformer训练",
+      "position": {
+        "x": 680,
+        "y": 100
+      },
+      "params": {
+        "label": "kfold_vit_transformer.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\04_model\\kfold_vit_transformer.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n4",
+      "type": "note",
+      "title": "输出：权重与交叉验证指标",
+      "position": {
+        "x": 1040,
+        "y": 100
+      },
+      "params": {
+        "content": "输出目录：\n{repo_root}\\data\\models\\kfold\\\n\n主要结果：\n- fold_1 至 fold_5：各折、各种子的模型权重\n- kfold_per_run_results.csv：5折×2种子的逐次结果\n- kfold_summary.csv：全部10次结果的均值和标准差"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "n1",
+      "target": "n3"
+    },
+    {
+      "id": "e2",
+      "source": "n2",
+      "target": "n3"
+    },
+    {
+      "id": "e3",
+      "source": "n3",
+      "target": "n4"
+    }
+  ]
+}

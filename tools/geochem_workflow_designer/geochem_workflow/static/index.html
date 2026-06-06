@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Geochem Workflow Designer</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app" class="app-shell" v-cloak>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">BASALT PIPELINE WORKBENCH</p>
+        <h1>地化数据工作流编排台</h1>
+      </div>
+      <div class="topbar-actions">
+        <button id="loadPresetBtn" class="primary">加载默认模板</button>
+        <button id="saveWorkflowBtn">保存到项目</button>
+        <button id="exportWorkflowBtn">导出 JSON</button>
+        <button id="deleteSelectedBtn">删除所选</button>
+        <button id="stopWorkflowBtn" class="danger" disabled>停止执行</button>
+        <button id="runWorkflowBtn" class="accent">运行工作流</button>
+      </div>
+    </header>
+
+    <section class="summary-strip">
+      <div class="summary-card">
+        <span class="summary-label">Runtime Context</span>
+        <strong id="contextRepoRoot">{{ state.runtimeContext.repo_root || '-' }}</strong>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Preset Focus</span>
+        <strong>先切分，再只在 Train 拟合</strong>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Current Workflow</span>
+        <strong id="workflowName">{{ state.workflow.name || 'default' }}</strong>
+      </div>
+    </section>
+
+    <main id="workspace" class="workspace">
+      <aside class="panel left-panel">
+        <div class="panel-header">
+          <h2>节点库</h2>
+          <p>从这里拖到画布</p>
+        </div>
+        <div id="palette"></div>
+        <div class="panel-header secondary">
+          <h2>已保存工作流</h2>
+        </div>
+        <div class="workflow-loader">
+          <select id="savedWorkflowSelect"></select>
+          <button id="loadSavedWorkflowBtn">加载</button>
+          <button id="refreshWorkflowsBtn">刷新</button>
+        </div>
+      </aside>
+
+      <div
+        id="leftResizeHandle"
+        class="panel-resizer"
+        data-resize-side="left"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整左侧面板宽度"
+        tabindex="0"
+      ></div>
+
+      <section class="canvas-panel">
+        <div class="canvas-toolbar">
+          <span>画布提示：拖节点、拖圆点连线、点击边或节点后可删除。</span>
+          <div class="canvas-toolbar-actions">
+            <div class="zoom-controls">
+              <button id="zoomOutBtn" type="button" class="tool-btn">-</button>
+              <button id="zoomResetBtn" type="button" class="tool-btn zoom-label">100%</button>
+              <button id="zoomInBtn" type="button" class="tool-btn">+</button>
+              <button id="zoomFitBtn" type="button" class="tool-btn">适配</button>
+            </div>
+            <div id="currentStepIndicator" class="current-step" :class="state.currentStepInfo.status">
+              <span class="current-step-label">当前执行</span>
+              <strong id="currentStepText">{{ state.currentStepInfo.title }}</strong>
+              <span id="currentStepSubtext" class="current-step-subtext">{{ state.currentStepInfo.subtitle }}</span>
+            </div>
+            <span id="runStatusBadge" class="status-badge" :class="(state.runData && state.runData.status) || 'idle'">{{ (state.runData && state.runData.status) || 'idle' }}</span>
+          </div>
+        </div>
+        <div id="canvasViewport">
+          <div id="canvasScaler">
+            <svg id="edgeLayer"></svg>
+            <div id="canvas"></div>
+          </div>
+        </div>
+      </section>
+
+      <div
+        id="rightResizeHandle"
+        class="panel-resizer"
+        data-resize-side="right"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整右侧面板宽度"
+        tabindex="0"
+      ></div>
+
+      <aside class="panel right-panel">
+        <div id="rightPanelSections" class="right-panel-sections">
+          <section class="right-panel-section property-section">
+            <div class="panel-header">
+              <h2>属性面板</h2>
+              <p>选中节点后编辑参数</p>
+            </div>
+            <div id="propertyPanel" class="property-panel empty">
+              选择一个节点以编辑参数。
+            </div>
+          </section>
+
+          <div
+            id="bottomResizeHandle"
+            class="panel-resizer panel-resizer-horizontal"
+            data-resize-side="bottom"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="调整属性面板和运行日志高度"
+            tabindex="0"
+          ></div>
+
+          <section class="right-panel-section log-section">
+            <div class="panel-header secondary log-panel-header">
+              <h2>运行日志</h2>
+              <p>后端执行状态与报错会显示在这里</p>
+            </div>
+            <pre id="logPanel" class="log-panel">
+<template v-if="state.displayLogs.length">
+  <span v-for="(entry, index) in state.displayLogs" :key="entry.id || index" :class="entry.className">
+    <template v-if="entry.kind === 'summary'">
+      <span class="log-meta">
+        <strong>{{ entry.source || 'CNN-BiLSTM' }}</strong>
+        <span>{{ entry.time }}</span>
+      </span>
+      <span class="epoch-summary-head">
+        <span class="epoch-badge">Epoch {{ entry.summary.epoch }}/{{ entry.summary.totalEpochs }}</span>
+        <span class="epoch-lr">LR {{ entry.summary.learningRate }}</span>
+      </span>
+      <span class="epoch-metrics">
+        <span><label>Train Loss</label><strong>{{ entry.summary.trainLoss }}</strong></span>
+        <span><label>Train Acc</label><strong>{{ entry.summary.trainAcc }}</strong></span>
+        <span><label>Val Loss</label><strong>{{ entry.summary.valLoss }}</strong></span>
+        <span><label>Val Acc</label><strong>{{ entry.summary.valAcc }}</strong></span>
+      </span>
+    </template>
+    <template v-else-if="entry.kind === 'progress'">
+      <span class="log-meta">
+        <strong>{{ entry.source }}</strong>
+        <span>{{ entry.time }}</span>
+      </span>
+      <span class="log-progress-head">
+        <span>{{ entry.progress.label }}</span>
+        <strong>{{ entry.progress.percent }}%</strong>
+      </span>
+      <span class="log-progress-bar"><span :style="{ width: entry.progress.percent + '%' }"></span></span>
+      <span class="log-progress-detail">{{ entry.progress.detail }}</span>
+    </template>
+    <template v-else>{{ entry.raw }}</template>
+  </span>
+</template>
+<template v-else>
+  <span class="log-line empty">等待工作流开始运行。</span>
+</template>
+            </pre>
+          </section>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

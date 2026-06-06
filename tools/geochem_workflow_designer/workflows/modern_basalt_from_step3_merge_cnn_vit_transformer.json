@@ -1,0 +1,294 @@
+{
+  "name": "modern_basalt_from_step3_merge_cnn_vit_transformer",
+  "description": "Workflow starting from step 3 GEOROC+PetDB merge, preserving the downstream preprocessing chain and swapping the final training step to CNN-ViT-Transformer.",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "note",
+      "title": "Start Note",
+      "position": {
+        "x": 40,
+        "y": 100
+      },
+      "params": {
+        "content": "This workflow starts from step 3 GEOROC+PetDB merge and keeps the same downstream preprocessing steps as the original modern basalt workflow."
+      }
+    },
+    {
+      "id": "n2",
+      "type": "merge_georoc_petdb",
+      "title": "3. Merge GEOROC+PetDB",
+      "position": {
+        "x": 360,
+        "y": 100
+      },
+      "params": {
+        "georoc_input_path": "{repo_root}\\data\\rockType\\basalt\\georoc\\tectonic_split\\09_basalt_refined_tectonic_settings_filtered\\09_basalt_refined_tectonic_settings_corrected_filtered_island_arc_reclassified.csv",
+        "petdb_input_path": "{repo_root}\\data\\rockType\\basalt\\petDB\\processed\\petDB.csv",
+        "output_path": "{repo_root}\\data\\rockType\\basalt\\basalt_combine\\01_basalt_number_year_correct.csv"
+      }
+    },
+    {
+      "id": "n3",
+      "type": "command_task",
+      "title": "4. Split Train/Test",
+      "position": {
+        "x": 640,
+        "y": 100
+      },
+      "params": {
+        "label": "split_train_test.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_preprocess\\split_train_test.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n4",
+      "type": "command_task",
+      "title": "5. Split Type",
+      "position": {
+        "x": 920,
+        "y": 30
+      },
+      "params": {
+        "label": "split_type.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_preprocess\\split_type.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n5",
+      "type": "command_task",
+      "title": "6. Outlier Detection",
+      "position": {
+        "x": 1200,
+        "y": 30
+      },
+      "params": {
+        "label": "Outlier_Detection_Basalt.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_interpolation\\Outlier_Detection_Basalt.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n6",
+      "type": "command_task",
+      "title": "7. MissForest Train",
+      "position": {
+        "x": 1480,
+        "y": 30
+      },
+      "params": {
+        "label": "imputation_train.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_interpolation\\imputation_train.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n7",
+      "type": "command_task",
+      "title": "8. MissForest Predict",
+      "position": {
+        "x": 920,
+        "y": 250
+      },
+      "params": {
+        "label": "imputation_predict.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_interpolation\\imputation_predict.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n8",
+      "type": "command_task",
+      "title": "9. Combine Batches",
+      "position": {
+        "x": 1760,
+        "y": 30
+      },
+      "params": {
+        "label": "combine_all_batch.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_preprocess\\combine_all_batch.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n9",
+      "type": "command_task",
+      "title": "10. Normalize Major Elements Train",
+      "position": {
+        "x": 2040,
+        "y": 30
+      },
+      "params": {
+        "label": "normalize_major_elements.py train",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"{repo_root}\\data_preprocess\\data_normalize\\normalize_major_elements.py\" --mode train",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n10",
+      "type": "command_task",
+      "title": "10. Normalize Major Elements Predict",
+      "position": {
+        "x": 1760,
+        "y": 250
+      },
+      "params": {
+        "label": "normalize_major_elements.py predict",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"{repo_root}\\data_preprocess\\data_normalize\\normalize_major_elements.py\" --mode predict",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n11",
+      "type": "command_task",
+      "title": "11. BorderlineSMOTE",
+      "position": {
+        "x": 2320,
+        "y": 30
+      },
+      "params": {
+        "label": "BorderlineSMOTE1.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_balance\\BorderlineSMOTE1.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n12",
+      "type": "command_task",
+      "title": "12. Quantile Normalize Train",
+      "position": {
+        "x": 2600,
+        "y": 30
+      },
+      "params": {
+        "label": "normalize.py train",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"{repo_root}\\data_preprocess\\data_normalize\\normalize.py\" --mode train",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n13",
+      "type": "command_task",
+      "title": "12. Quantile Normalize Predict",
+      "position": {
+        "x": 2320,
+        "y": 250
+      },
+      "params": {
+        "label": "normalize.py predict",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"{repo_root}\\data_preprocess\\data_normalize\\normalize.py\" --mode predict",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n14",
+      "type": "command_task",
+      "title": "13. CNN-ViT-Transformer Train",
+      "position": {
+        "x": 2880,
+        "y": 100
+      },
+      "params": {
+        "label": "cnn_vit_transformer_presplit.py",
+        "command": "\"{python_exe}\" \"E:\\program\\CNNtest\\model_train\\CNN-ViT-Transformer\\cnn_vit_transformer_presplit.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n15",
+      "type": "note",
+      "title": "Output Note",
+      "position": {
+        "x": 3160,
+        "y": 100
+      },
+      "params": {
+        "content": "Final training outputs are written by the script itself to:\nE:\\program\\CNNtest\\data\\rockType\\basalt\\basalt_combine\\dataset_split_correct\\CNN_ViT_Transformer"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "n1",
+      "target": "n2"
+    },
+    {
+      "id": "e2",
+      "source": "n2",
+      "target": "n3"
+    },
+    {
+      "id": "e3",
+      "source": "n3",
+      "target": "n4"
+    },
+    {
+      "id": "e4",
+      "source": "n4",
+      "target": "n5"
+    },
+    {
+      "id": "e5",
+      "source": "n5",
+      "target": "n6"
+    },
+    {
+      "id": "e6",
+      "source": "n3",
+      "target": "n7"
+    },
+    {
+      "id": "e7",
+      "source": "n6",
+      "target": "n7"
+    },
+    {
+      "id": "e8",
+      "source": "n6",
+      "target": "n8"
+    },
+    {
+      "id": "e9",
+      "source": "n8",
+      "target": "n9"
+    },
+    {
+      "id": "e10",
+      "source": "n7",
+      "target": "n10"
+    },
+    {
+      "id": "e11",
+      "source": "n9",
+      "target": "n11"
+    },
+    {
+      "id": "e12",
+      "source": "n11",
+      "target": "n12"
+    },
+    {
+      "id": "e13",
+      "source": "n10",
+      "target": "n13"
+    },
+    {
+      "id": "e14",
+      "source": "n12",
+      "target": "n14"
+    },
+    {
+      "id": "e15",
+      "source": "n13",
+      "target": "n14"
+    },
+    {
+      "id": "e16",
+      "source": "n14",
+      "target": "n15"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "name": "cnn_bilstm_train_only",
+  "description": "Run only the presplit CNN-BiLSTM training step.",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "note",
+      "title": "训练前提",
+      "position": {
+        "x": 40,
+        "y": 80
+      },
+      "params": {
+        "content": "这个工作流只运行 CNN-BiLSTM 训练脚本。\n默认直接使用现有的 12_normalize_basalt_train_7000.csv 和 13_normalize_basalt_test_7000.csv。"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "cnn_bilstm_train",
+      "title": "13. CNN-BiLSTM ??",
+      "position": {
+        "x": 360,
+        "y": 80
+      },
+      "params": {
+        "train_file": "{repo_root}/data/rockType/basalt/basalt_combine/dataset_split_correct/12_normalize_basalt_train_7000.csv",
+        "test_file": "{repo_root}/data/rockType/basalt/basalt_combine/dataset_split_correct/13_normalize_basalt_test_7000.csv",
+        "output_dir": "{repo_root}/data/rockType/basalt/basalt_combine/dataset_split_correct/CNN_BiLSTM",
+        "seed": 42,
+        "batch_size": 64,
+        "epochs": 200,
+        "lr": 0.0001,
+        "weight_decay": 0.03,
+        "scheduler_patience": 15,
+        "early_stopping_patience": 40,
+        "mixup_alpha": 0.4,
+        "label_smoothing": 0.2,
+        "file_stem": "basalt",
+        "model_name": "cnn_bilstm_best.pth",
+        "results_name": "CNN_BiLSTM_results.csv",
+        "workdir": "{repo_root}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "n1",
+      "target": "n2"
+    }
+  ]
+}

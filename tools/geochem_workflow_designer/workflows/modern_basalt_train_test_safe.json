@@ -1,0 +1,365 @@
+{
+  "name": "current_script_chain_cnn_bilstm",
+  "description": "Workflow aligned to the current hard-coded CNNtest script chain.",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "note",
+      "title": "目录组织建议",
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "params": {
+        "content": "默认建议继续沿用 E:\\program\\CNNtest 下的既有输入/输出目录。\n原因：当前多数研究脚本仍是硬编码路径，移动到 workflow 程序目录会增加维护成本。\nworkflow 程序目录只保存流程定义、helper 脚本和运行日志。"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "rebuild_refined_basalt_labels",
+      "title": "1. 合并海洋/陆地标签",
+      "position": {
+        "x": 360,
+        "y": 40
+      },
+      "params": {
+        "sea_path": "{repo_root}/data/rockType/basalt/georoc/tectonic_split/03_sea_unknown_review_working/03-2_intra_oceanic_arc_candidates_labeled_revised.csv",
+        "land_path": "{repo_root}/data/rockType/basalt/georoc/tectonic_split/06_land_unknown_review_working/06-5_convergent_margin_unknown_location_type_subset_labeled_revised.csv",
+        "merged_raw_path": "{repo_root}/data/rockType/basalt/georoc/merged_raw/basalt_2025.csv",
+        "convergent_output_path": "{repo_root}/data/rockType/basalt/georoc/tectonic_split/06-6_convergent_margin_final_labeled_revised.csv",
+        "basalt_output_path": "{repo_root}/data/rockType/basalt/georoc/tectonic_split/08_basalt_refined_tectonic_settings/08_basalt_refined_tectonic_settings_revised.csv",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n3",
+      "type": "extract_georoc_filter",
+      "title": "2. GEOROC 筛选",
+      "position": {
+        "x": 640,
+        "y": 40
+      },
+      "params": {
+        "file_path": "{repo_root}/data/rockType/basalt/georoc/tectonic_split/08_basalt_refined_tectonic_settings/08_basalt_refined_tectonic_settings_revised.csv",
+        "output_path": "{repo_root}/data/rockType/basalt/georoc/processed/detail_filtered_with_metadata/08_basalt_refined_tectonic_settings_origin_filtered.csv",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n4",
+      "type": "note",
+      "title": "PetDB 输入",
+      "position": {
+        "x": 640,
+        "y": 240
+      },
+      "params": {
+        "content": "当前流程直接复用：\nE:\\program\\CNNtest\\data\\rockType\\basalt\\petDB\\processed\\petDB.csv"
+      }
+    },
+    {
+      "id": "n5",
+      "type": "merge_georoc_petdb",
+      "title": "3. GEOROC+PetDB 合并",
+      "position": {
+        "x": 920,
+        "y": 110
+      },
+      "params": {
+        "georoc_input_path": "{repo_root}\\data\\rockType\\basalt\\georoc\\tectonic_split\\08_basalt_refined_tectonic_settings\\09_basalt_refined_tectonic_settings_corrected_filtered.csv",
+        "petdb_input_path": "{repo_root}\\data\\rockType\\basalt\\petDB\\processed\\petDB.csv",
+        "output_path": "{repo_root}\\data\\rockType\\basalt\\basalt_combine\\01_basalt_number_year_correct.csv"
+      }
+    },
+    {
+      "id": "n6",
+      "type": "command_task",
+      "title": "4. 训练/测试拆分",
+      "position": {
+        "x": 1200,
+        "y": 110
+      },
+      "params": {
+        "label": "split_train_test.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_preprocess\\split_train_test.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n7",
+      "type": "command_task",
+      "title": "5. 训练集按构造环境拆分",
+      "position": {
+        "x": 1480,
+        "y": 40
+      },
+      "params": {
+        "label": "split_type.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_preprocess\\split_type.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n8",
+      "type": "command_task",
+      "title": "6. split 清洗",
+      "position": {
+        "x": 1760,
+        "y": 40
+      },
+      "params": {
+        "label": "Outlier_Detection_Basalt.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_interpolation\\Outlier_Detection_Basalt.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n9",
+      "type": "command_task",
+      "title": "7. 训练集 MissForest",
+      "position": {
+        "x": 2040,
+        "y": 40
+      },
+      "params": {
+        "label": "imputation_train.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_interpolation\\imputation_train.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n10",
+      "type": "command_task",
+      "title": "8. 测试集插补",
+      "position": {
+        "x": 1480,
+        "y": 260
+      },
+      "params": {
+        "label": "imputation_predict.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_interpolation\\imputation_predict.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n11",
+      "type": "command_task",
+      "title": "9. 合并训练集插补结果",
+      "position": {
+        "x": 2320,
+        "y": 40
+      },
+      "params": {
+        "label": "combine_all_batch.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_preprocess\\combine_all_batch.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n12",
+      "type": "command_task",
+      "title": "10. 主量无水归一 train",
+      "position": {
+        "x": 2600,
+        "y": 40
+      },
+      "params": {
+        "label": "normalize_major_elements.py train",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"{repo_root}\\data_preprocess\\data_normalize\\normalize_major_elements.py\" --mode train",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n13",
+      "type": "command_task",
+      "title": "10. 主量无水归一 predict",
+      "position": {
+        "x": 2320,
+        "y": 260
+      },
+      "params": {
+        "label": "normalize_major_elements.py predict",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"{repo_root}\\data_preprocess\\data_normalize\\normalize_major_elements.py\" --mode predict",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n14",
+      "type": "command_task",
+      "title": "11. BorderlineSMOTE",
+      "position": {
+        "x": 2880,
+        "y": 40
+      },
+      "params": {
+        "label": "BorderlineSMOTE1.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\data_balance\\BorderlineSMOTE1.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n15",
+      "type": "command_task",
+      "title": "12. 分位数归一 train",
+      "position": {
+        "x": 3160,
+        "y": 40
+      },
+      "params": {
+        "label": "normalize.py train",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"{repo_root}\\data_preprocess\\data_normalize\\normalize.py\" --mode train",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n16",
+      "type": "command_task",
+      "title": "12. 分位数归一 predict",
+      "position": {
+        "x": 2880,
+        "y": 260
+      },
+      "params": {
+        "label": "normalize.py predict",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"{repo_root}\\data_preprocess\\data_normalize\\normalize.py\" --mode predict",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n17",
+      "type": "cnn_bilstm_train",
+      "title": "13. CNN-BiLSTM 训练",
+      "position": {
+        "x": 3440,
+        "y": 110
+      },
+      "params": {
+        "train_file": "{repo_root}/data/rockType/basalt/basalt_combine/dataset_split_correct/12_normalize_basalt_train_7000.csv",
+        "test_file": "{repo_root}/data/rockType/basalt/basalt_combine/dataset_split_correct/13_normalize_basalt_test_7000.csv",
+        "output_dir": "{repo_root}/data/rockType/basalt/basalt_combine/dataset_split_correct/CNN_BiLSTM",
+        "seed": 42,
+        "batch_size": 64,
+        "epochs": 200,
+        "lr": 0.0001,
+        "weight_decay": 0.03,
+        "scheduler_patience": 15,
+        "early_stopping_patience": 40,
+        "mixup_alpha": 0.4,
+        "label_smoothing": 0.2,
+        "file_stem": "basalt",
+        "model_name": "cnn_bilstm_best.pth",
+        "results_name": "CNN_BiLSTM_results.csv",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n18",
+      "type": "note",
+      "title": "结果输出",
+      "position": {
+        "x": 3720,
+        "y": 110
+      },
+      "params": {
+        "content": "最终训练结果默认写入：\nE:\\program\\CNNtest\\data\\rockType\\basalt\\basalt_combine\\dataset_split_correct\\CNN_BiLSTM\n\n这套默认模板优先保证和现有研究脚本兼容，而不是强行迁移目录。"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "n1",
+      "target": "n2"
+    },
+    {
+      "id": "e2",
+      "source": "n2",
+      "target": "n3"
+    },
+    {
+      "id": "e3",
+      "source": "n3",
+      "target": "n5"
+    },
+    {
+      "id": "e4",
+      "source": "n4",
+      "target": "n5"
+    },
+    {
+      "id": "e5",
+      "source": "n5",
+      "target": "n6"
+    },
+    {
+      "id": "e6",
+      "source": "n6",
+      "target": "n7"
+    },
+    {
+      "id": "e7",
+      "source": "n7",
+      "target": "n8"
+    },
+    {
+      "id": "e8",
+      "source": "n8",
+      "target": "n9"
+    },
+    {
+      "id": "e9",
+      "source": "n6",
+      "target": "n10"
+    },
+    {
+      "id": "e9b",
+      "source": "n9",
+      "target": "n10"
+    },
+    {
+      "id": "e10",
+      "source": "n9",
+      "target": "n11"
+    },
+    {
+      "id": "e11",
+      "source": "n11",
+      "target": "n12"
+    },
+    {
+      "id": "e12",
+      "source": "n10",
+      "target": "n13"
+    },
+    {
+      "id": "e13",
+      "source": "n12",
+      "target": "n14"
+    },
+    {
+      "id": "e14",
+      "source": "n14",
+      "target": "n15"
+    },
+    {
+      "id": "e15",
+      "source": "n13",
+      "target": "n16"
+    },
+    {
+      "id": "e16",
+      "source": "n15",
+      "target": "n17"
+    },
+    {
+      "id": "e17",
+      "source": "n16",
+      "target": "n17"
+    },
+    {
+      "id": "e18",
+      "source": "n17",
+      "target": "n18"
+    }
+  ]
+}

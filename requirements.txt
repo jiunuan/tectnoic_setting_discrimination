@@ -1,0 +1,31 @@
+# ============================================================
+# Python 依赖（玄武岩构造环境判别项目）
+# 建议 Python >= 3.10
+# 安装： pip install -r requirements.txt
+# 注意：PyTorch 请按官网命令安装匹配 CUDA 版本的 torch（GPU 训练）
+# ============================================================
+
+# ── 核心数值/数据处理 ──
+numpy
+pandas
+scipy
+
+# ── 机器学习 ──
+scikit-learn
+joblib                    # 模型 / 参数序列化
+xgboost                   # ML 基线对比
+
+# ── 深度学习（按官网选择 CUDA 版本）──
+torch
+
+# ── 可解释性 ──
+shap
+
+# ── 绘图 ──
+matplotlib
+
+# ── 进度条 ──
+tqdm
+
+# ── Excel 读取（太古代应用数据集 .xlsx）──
+openpyxl
