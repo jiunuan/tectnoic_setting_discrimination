@@ -1,29 +1,28 @@
-import pandas as pd
-import numpy as np
-import os
 import sys
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.paths import (
-    TRAIN_IMPUTED_CSV, TRAIN_MAJOR_NORM_CSV,
-    TEST_IMPUTED_CSV, TEST_MAJOR_NORM_CSV,
+    TRAIN_IMPUTED_CSV, TEST_IMPUTED_CSV,
+    TRAIN_MAJOR_NORM_CSV, TEST_MAJOR_NORM_CSV,
 )
 
 # ============================================================
-# 主量无水归一化：逐行计算（每行除以该行 10 个主量元素之和 × 100），
-# 无需全局拟合参数，训练与测试使用完全相同的公式，不存在数据泄露风险。
-# 因此本脚本一次性先处理训练集、再直接 transform 测试集，无需切换运行模式。
+# 一次运行同时处理训练集和测试集。
+# 主量无水标准化是逐行计算，不依赖全局拟合参数，不存在数据泄露。
 # ============================================================
 
 # -------------------- 路径配置 --------------------
-# 训练集：插补后合并文件
+# 训练集：插补后、SMOTE 前
 TRAIN_INPUT_FILE  = str(TRAIN_IMPUTED_CSV)
 TRAIN_OUTPUT_FILE = str(TRAIN_MAJOR_NORM_CSV)
 
-# 测试集：插补后文件（未经 IQR clean）
-PREDICT_INPUT_FILE  = str(TEST_IMPUTED_CSV)
-PREDICT_OUTPUT_FILE = str(TEST_MAJOR_NORM_CSV)
+# 测试集：插补后，不执行 SMOTE
+TEST_INPUT_FILE  = str(TEST_IMPUTED_CSV)
+TEST_OUTPUT_FILE = str(TEST_MAJOR_NORM_CSV)
 
 # 10 个主量元素（训练与预测完全一致）
 MAJOR_ELEMENTS = [
@@ -55,16 +54,26 @@ def normalize_major_elements(df):
         raise ValueError(f"输入数据缺少以下主量元素列: {missing_cols}")
 
     df_normalized = df.copy()
-    row_total = df_normalized[MAJOR_ELEMENTS].sum(axis=1)
+    major_values = df_normalized[MAJOR_ELEMENTS].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
 
-    # 检查行总和为 0 的异常行（通常意味着所有主量均缺失）
-    zero_total_mask = row_total == 0
-    if zero_total_mask.any():
-        n_zero = zero_total_mask.sum()
-        print(f"[WARNING] {n_zero} 行的主量元素总和为 0，归一化后将产生 NaN，请检查插补结果。")
+    invalid_value_mask = major_values.isna() | ~np.isfinite(major_values)
+    if invalid_value_mask.any().any():
+        invalid_rows = int(invalid_value_mask.any(axis=1).sum())
+        raise ValueError(f"存在 {invalid_rows} 行主量元素缺失或为非有限值")
 
-    for element in MAJOR_ELEMENTS:
-        df_normalized[element] = df_normalized[element] / row_total * 100
+    row_total = major_values.sum(axis=1)
+    invalid_total_mask = row_total <= 0
+    if invalid_total_mask.any():
+        invalid_rows = int(invalid_total_mask.sum())
+        raise ValueError(f"存在 {invalid_rows} 行主量元素总和不大于0")
+
+    df_normalized.loc[:, MAJOR_ELEMENTS] = major_values.div(
+        row_total,
+        axis=0,
+    ) * 100
 
     return df_normalized
 
@@ -91,7 +100,7 @@ def process_file(input_path, output_path, mode_label):
     参数:
         input_path  : str, 输入 CSV 路径
         output_path : str, 输出 CSV 路径
-        mode_label  : str, 日志前缀（"TRAIN" 或 "PREDICT"）
+        mode_label  : str, 日志前缀（"TRAIN" 或 "TEST"）
     """
     # 1. 读取
     df = pd.read_csv(input_path)
@@ -106,24 +115,35 @@ def process_file(input_path, output_path, mode_label):
     print_normalization_stats(df, df_normalized)
 
     # 4. 保存
-    out_dir = os.path.dirname(output_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     df_normalized.to_csv(output_path, index=False)
     print(f"[{mode_label}] 主量归一化结果已保存至: {output_path}")
 
 
 # ============================================================
-# 主流程
+# 主流程：一次完成训练集和测试集
 # ============================================================
 
-if __name__ == "__main__":
-    # 主量无水归一化为逐行运算，训练与测试公式完全一致，
-    # 一次性先处理训练集、再 transform 测试集，无需切换运行模式。
-    print("=" * 50)
-    print("主量无水归一化：训练集 + 测试集一次性处理")
-    print("=" * 50)
-    process_file(TRAIN_INPUT_FILE, TRAIN_OUTPUT_FILE, mode_label="TRAIN")
-    process_file(PREDICT_INPUT_FILE, PREDICT_OUTPUT_FILE, mode_label="PREDICT")
+def main():
+    """依次对训练集和测试集执行相同的主量无水标准化。"""
+    print("=" * 60)
+    print("训练集与测试集主量元素无水标准化")
+    print("=" * 60)
 
-    print("主量归一化完成")
+    process_file(
+        TRAIN_INPUT_FILE,
+        TRAIN_OUTPUT_FILE,
+        mode_label="TRAIN",
+    )
+    print()
+    process_file(
+        TEST_INPUT_FILE,
+        TEST_OUTPUT_FILE,
+        mode_label="TEST",
+    )
+
+    print("\n[完成] 训练集与测试集主量无水标准化全部完成")
+
+
+if __name__ == "__main__":
+    main()

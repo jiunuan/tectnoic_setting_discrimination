@@ -33,17 +33,18 @@ RAW_DIR        = DATA_DIR / "00_raw"            # 原始数据
 CM_RECLASS_DIR = DATA_DIR / "01_cm_reclass_input"  # 汇聚边缘细分产出（输入起点）
 FILTERED_DIR   = DATA_DIR / "02_filtered"       # 筛选后
 COMBINED_DIR   = DATA_DIR / "03_combined"       # GEOROC + PetDB 合并
-SPLIT_DIR      = DATA_DIR / "04_split"          # 训练/测试切分 + 按类型拆分 + IQR clean
-IMPUTED_DIR    = DATA_DIR / "05_imputed"        # 按类别 MissForest 插补
-NORMALIZED_DIR = DATA_DIR / "06_normalized"     # 主量无水标准化 + 分位归一化
+SPLIT_DIR      = DATA_DIR / "04_split"          # 训练/测试切分
+IMPUTED_DIR    = DATA_DIR / "05_imputed"        # 全局 RF 插补 + 缺失 mask
+NORMALIZED_DIR = DATA_DIR / "06_normalized"     # 主量无水标准化 + SMOTE + 分位归一化
 MODELS_DIR     = DATA_DIR / "models"            # 训练产出权重 .pth
 ARCHEAN_DIR    = DATA_DIR / "archean"           # 太古代应用数据 + 案例 + 输出
 
 # ════════════════════════════════════════════════════════════════
 # 00_raw —— 原始数据文件
 # ════════════════════════════════════════════════════════════════
-GEOROC_RAW_CSV = RAW_DIR / "georoc" / "basalt_2025.csv"
-PETDB_RAW_CSV  = RAW_DIR / "petdb" / "petDB_recent_downloads_merged.csv"
+GEOROC_RAW_CSV        = RAW_DIR / "georoc" / "basalt_2025.csv"
+PETDB_RAW_CSV         = RAW_DIR / "petdb" / "petdbv2_merged.csv"          # PetDB 2.0 合并原始表
+GEOROC_REFERENCES_CSV = RAW_DIR / "georoc" / "references_structured.csv"  # GEOROC 参考文献编号→年份映射
 
 # ════════════════════════════════════════════════════════════════
 # 01_cm_reclass_input —— 汇聚边缘细分项目（convergent_margin_reclass）的产出
@@ -65,29 +66,31 @@ PETDB_FILTERED_CSV  = FILTERED_DIR / "petDB.csv"
 COMBINED_CSV = COMBINED_DIR / "01_basalt_number_year.csv"
 
 # ════════════════════════════════════════════════════════════════
-# 04_split —— 训练/测试切分、按构造环境拆分、IQR clean
+# 04_split —— 训练/测试切分
 # ════════════════════════════════════════════════════════════════
 TRAIN_RAW_CSV      = SPLIT_DIR / "01_basalt_number_year_train.csv"
 TEST_RAW_CSV       = SPLIT_DIR / "01_basalt_number_year_test.csv"
 SPLIT_SUMMARY_CSV  = SPLIT_DIR / "split_summary.csv"
-SPLIT_BY_TYPE_DIR  = SPLIT_DIR / "preprocess" / "split"   # 按构造环境拆分的训练子集
-CLEAN_DIR          = SPLIT_DIR / "preprocess" / "clean"   # IQR 去除离群后的 *_clean.csv
 
 # ════════════════════════════════════════════════════════════════
-# 05_imputed —— 按构造环境类别 MissForest 插补
+# 05_imputed —— 全局随机森林插补（训练集 fit / 测试集 transform）
+#               + 插补前的原始缺失 mask（1=原始缺失，0=原始实测）
 # ════════════════════════════════════════════════════════════════
-MISSFOREST_DIR    = IMPUTED_DIR / "MissForest"   # 各类别 *_clean_imputed.csv
 TRAIN_IMPUTED_CSV = IMPUTED_DIR / "02_basalt_train_imputed.csv"
 TEST_IMPUTED_CSV  = IMPUTED_DIR / "02_basalt_test_imputed.csv"
+MASK_TRAIN_CSV    = IMPUTED_DIR / "03_train_missing_mask.csv"
+MASK_TEST_CSV     = IMPUTED_DIR / "03_test_missing_mask.csv"
 
 # ════════════════════════════════════════════════════════════════
-# 06_normalized —— 主量元素无水标准化 + 分位数分箱归一化
+# 06_normalized —— 主量无水标准化 + 选择性 SMOTE + 分位数分箱归一化
 # ════════════════════════════════════════════════════════════════
-TRAIN_MAJOR_NORM_CSV = NORMALIZED_DIR / "03_basalt_train_major_normalize.csv"
-TEST_MAJOR_NORM_CSV  = NORMALIZED_DIR / "03_basalt_test_major_normalize.csv"
-TRAIN_NORM_CSV       = NORMALIZED_DIR / "05_normalize_basalt_train.csv"   # 最终喂模型/SHAP 的训练集
-TEST_NORM_CSV        = NORMALIZED_DIR / "05_normalize_basalt_test.csv"    # 最终喂模型/SHAP 的测试集
-QUANTILE_PARAMS_JSON = NORMALIZED_DIR / "quantile_params.json"            # 训练集分位参数（应用集共用）
+TRAIN_MAJOR_NORM_CSV    = NORMALIZED_DIR / "04_basalt_train_major_normalize.csv"
+TEST_MAJOR_NORM_CSV     = NORMALIZED_DIR / "04_basalt_test_major_normalize.csv"
+TRAIN_SMOTE_CSV         = NORMALIZED_DIR / "05_basalt_train_selected_smote.csv"   # 仅训练集执行 SMOTE
+TRAIN_NORM_CSV          = NORMALIZED_DIR / "06_normalize_basalt_train.csv"        # 最终喂模型/SHAP 的训练集（SMOTE 后）
+TRAIN_NORM_NO_SMOTE_CSV = NORMALIZED_DIR / "06_normalize_basalt_train_no_smote.csv"  # 未 SMOTE 的真实训练集（对照实验用）
+TEST_NORM_CSV           = NORMALIZED_DIR / "06_normalize_basalt_test.csv"         # 最终喂模型/SHAP 的测试集
+QUANTILE_PARAMS_JSON    = NORMALIZED_DIR / "quantile_params.json"                 # 分位参数（从 SMOTE 前训练集拟合）
 
 # ════════════════════════════════════════════════════════════════
 # models —— 训练产出权重
@@ -96,11 +99,28 @@ GEODAN_DIR        = MODELS_DIR / "GeoDAN"
 MAIN_MODEL_WEIGHT = MODELS_DIR / "Full_Model_(ViT+Transformer)_best_seed.pth"
 
 # ════════════════════════════════════════════════════════════════
-# archean —— 太古代应用（no_impute 模式）
+# archean —— 太古代应用（缺失编码：不插补，缺失值数值编码 0 + mask 1）
 # ════════════════════════════════════════════════════════════════
-ARCHEAN_DATA_SUBDIR = ARCHEAN_DIR / "data"          # 太古代原始 CSV + 6 克拉通案例
+ARCHEAN_DATA_SUBDIR = ARCHEAN_DIR / "data"          # 太古代原始 CSV（Liu 数据）+ 6 克拉通案例
 ARCHEAN_S3_CSV      = ARCHEAN_DATA_SUBDIR / "archean_basalt.csv"
 ARCHEAN_OUTPUT_DIR  = ARCHEAN_DIR / "outputs"        # 太古代预处理 / 预测输出
+
+# 扩展太古代应用集（Liu SiO2≤54 放宽 + GeoROC 恢复的 ARCHEAN 样品）
+ARCHEAN_POOL_DIR        = ARCHEAN_OUTPUT_DIR / "extended_archean_pool"
+ARCHEAN_POOL_RAW_CSV    = ARCHEAN_POOL_DIR / "expanded_archean_raw.csv"
+ARCHEAN_POOL_CSV        = ARCHEAN_POOL_DIR / "expanded_archean_basalt_age_nonmissing.csv"  # 正式 3,483 条应用集
+ARCHEAN_POOL_MASK_CSV   = ARCHEAN_POOL_DIR / "expanded_archean_missing_mask.csv"
+
+# 正式缺失编码预测输出（GeoDAN final）
+ARCHEAN_FINAL_DIR             = ARCHEAN_OUTPUT_DIR / "archean_geodan_final"
+ARCHEAN_FINAL_MASK_CSV        = ARCHEAN_FINAL_DIR / "expanded_archean_missing_mask.csv"
+ARCHEAN_FINAL_PREDICTIONS_CSV = ARCHEAN_FINAL_DIR / "expanded_archean_predictions.csv"
+
+# 6 克拉通案例研究输出
+ARCHEAN_CASE_DIR = ARCHEAN_OUTPUT_DIR / "archean_case_studies"
+
+# 分布一致性 / 适用域诊断输出
+ARCHEAN_CONSISTENCY_DIR = ARCHEAN_OUTPUT_DIR / "distribution_consistency"
 
 # ════════════════════════════════════════════════════════════════
 # 论文图件输出

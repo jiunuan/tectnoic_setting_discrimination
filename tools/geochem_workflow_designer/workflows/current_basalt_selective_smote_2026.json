@@ -1,0 +1,167 @@
+{
+  "name": "current_basalt_selective_smote_2026",
+  "description": "当前无水筛选数据集的训练/测试预处理流程。仅训练集四个少数类执行温和 SMOTE 到 2200，测试集保持原始分布。",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "note",
+      "title": "输入与原则",
+      "position": {"x": 40, "y": 80},
+      "params": {
+        "content": "输入：E:\\program\\CNNtest\\data\\rockType\\basalt\\basalt_combine\\01_basalt_number_year_wr.csv（30547 条）。该文件已经按 10 项主量无水 100% 基准完成 SiO2/MgO/Al2O3 成分筛选。先分层切分，再只对训练集采样；测试集绝不执行 SMOTE。"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "command_task",
+      "title": "1. 分层切分训练/测试集",
+      "position": {"x": 330, "y": 80},
+      "params": {
+        "label": "split_train_test.py",
+        "command": "\"{python_exe}\" \"E:\\program\\CNNtest\\data_preprocess\\split_train_test.py\"",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n3",
+      "type": "command_task",
+      "title": "2. 训练集按构造环境拆分",
+      "position": {"x": 620, "y": 20},
+      "params": {
+        "label": "split_type.py",
+        "command": "\"{python_exe}\" \"E:\\program\\CNNtest\\data_preprocess\\split_type.py\"",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n4",
+      "type": "command_task",
+      "title": "3. 训练集异常值清洗",
+      "position": {"x": 910, "y": 20},
+      "params": {
+        "label": "Outlier_Detection_Basalt.py",
+        "command": "\"{python_exe}\" \"E:\\program\\CNNtest\\data_preprocess\\Outlier_Detection_Basalt.py\"",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n5",
+      "type": "command_task",
+      "title": "4a. 训练集插补",
+      "position": {"x": 1200, "y": 20},
+      "params": {
+        "label": "imputation_train.py",
+        "command": "\"{python_exe}\" \"E:\\program\\CNNtest\\data_interpolation\\imputation_train.py\"",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n6",
+      "type": "command_task",
+      "title": "4b. 测试集插补",
+      "position": {"x": 1200, "y": 250},
+      "params": {
+        "label": "imputation_predict.py",
+        "command": "\"{python_exe}\" \"E:\\program\\CNNtest\\data_interpolation\\imputation_predict.py\"",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n7",
+      "type": "command_task",
+      "title": "5. 合并训练集插补结果",
+      "position": {"x": 1490, "y": 20},
+      "params": {
+        "label": "combine_all_batch.py",
+        "command": "\"{python_exe}\" \"E:\\program\\CNNtest\\data_preprocess\\combine_all_batch.py\"",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n8",
+      "type": "command_task",
+      "title": "6a. 训练集主量无水归一",
+      "position": {"x": 1780, "y": 20},
+      "params": {
+        "label": "normalize_major_elements.py train",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"E:\\program\\CNNtest\\data_preprocess\\data_normalize\\normalize_major_elements.py\" --mode train",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n9",
+      "type": "command_task",
+      "title": "6b. 测试集主量无水归一",
+      "position": {"x": 1780, "y": 250},
+      "params": {
+        "label": "normalize_major_elements.py predict",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"E:\\program\\CNNtest\\data_preprocess\\data_normalize\\normalize_major_elements.py\" --mode predict",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n10",
+      "type": "smote_balance",
+      "title": "7. 仅训练集选择性 SMOTE",
+      "position": {"x": 2070, "y": 20},
+      "params": {
+        "input_path": "E:\\program\\CNNtest\\data\\rockType\\basalt\\basalt_combine\\dataset_split_wr\\03_basalt_train_major_normalize.csv",
+        "output_path": "E:\\program\\CNNtest\\data\\rockType\\basalt\\basalt_combine\\dataset_split_wr\\04_basalt_train_selected_smote.csv",
+        "label_column": "TECTONIC SETTING",
+        "target_count": 2200,
+        "class_targets": "Island arc=2200\nBACK-ARC_BASIN=2200\nIntra-oceanic arc=2200\nOCEANIC PLATEAU=2200",
+        "feature_columns": "NA2O(WT%)\nMGO(WT%)\nAL2O3(WT%)\nSIO2(WT%)\nP2O5(WT%)\nK2O(WT%)\nCAO(WT%)\nTIO2(WT%)\nMNO(WT%)\nFEOT(WT%)\nRB(PPM)\nV(PPM)\nCR(PPM)\nCO(PPM)\nNI(PPM)\nBA(PPM)\nSR(PPM)\nY(PPM)\nZR(PPM)\nNB(PPM)\nLA(PPM)\nCE(PPM)\nPR(PPM)\nND(PPM)\nSM(PPM)\nEU(PPM)\nGD(PPM)\nTB(PPM)\nDY(PPM)\nHO(PPM)\nER(PPM)\nYB(PPM)\nLU(PPM)\nHF(PPM)\nTA(PPM)\nTH(PPM)",
+        "k_neighbors": 5,
+        "random_state": 42
+      }
+    },
+    {
+      "id": "n11",
+      "type": "command_task",
+      "title": "8a. 训练集分位数变换",
+      "position": {"x": 2360, "y": 20},
+      "params": {
+        "label": "normalize.py train",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"E:\\program\\CNNtest\\data_preprocess\\data_normalize\\normalize.py\" --mode train",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n12",
+      "type": "command_task",
+      "title": "8b. 测试集复用训练分位数",
+      "position": {"x": 2650, "y": 250},
+      "params": {
+        "label": "normalize.py predict",
+        "command": "\"{python_exe}\" \"{workflow_root}\\script_helpers\\run_with_mode.py\" --script \"E:\\program\\CNNtest\\data_preprocess\\data_normalize\\normalize.py\" --mode predict",
+        "workdir": "E:\\program\\CNNtest"
+      }
+    },
+    {
+      "id": "n13",
+      "type": "note",
+      "title": "输出与评估",
+      "position": {"x": 2940, "y": 100},
+      "params": {
+        "content": "训练输出：05_normalize_basalt_train.csv；测试输出：05_normalize_basalt_test.csv。模型评估优先报告 macro-F1、balanced accuracy、各类别 recall 和混淆矩阵。建议模型端同时比较“仅 SMOTE”和“SMOTE + class weight”两组实验。"
+      }
+    }
+  ],
+  "edges": [
+    {"id": "e1", "source": "n1", "target": "n2"},
+    {"id": "e2", "source": "n2", "target": "n3"},
+    {"id": "e3", "source": "n3", "target": "n4"},
+    {"id": "e4", "source": "n4", "target": "n5"},
+    {"id": "e5", "source": "n2", "target": "n6"},
+    {"id": "e6", "source": "n5", "target": "n6"},
+    {"id": "e7", "source": "n5", "target": "n7"},
+    {"id": "e8", "source": "n7", "target": "n8"},
+    {"id": "e9", "source": "n6", "target": "n9"},
+    {"id": "e10", "source": "n8", "target": "n10"},
+    {"id": "e11", "source": "n10", "target": "n11"},
+    {"id": "e12", "source": "n9", "target": "n12"},
+    {"id": "e13", "source": "n11", "target": "n12"},
+    {"id": "e14", "source": "n11", "target": "n13"},
+    {"id": "e15", "source": "n12", "target": "n13"}
+  ]
+}

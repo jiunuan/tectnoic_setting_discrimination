@@ -232,7 +232,7 @@ def run_cnn_bilstm_train(node: dict, context: dict[str, str], log: LogFn) -> dic
 def run_extract_georoc_filter(node: dict, context: dict[str, str], log: LogFn) -> dict:
     params = node["params"]
     repo_root = resolve_text("{repo_root}", context)
-    script_path = Path(repo_root) / "data_preprocess" / "extract" / "extract_georoc.py"
+    script_path = Path(repo_root) / "01_preprocessing" / "filter" / "extract_georoc.py"
     command = (
         f'"{resolve_text("{python_exe}", context)}" '
         f'"{script_path}" '
@@ -486,7 +486,9 @@ def run_smote_balance(node: dict, context: dict[str, str], log: LogFn) -> dict:
     label_column = params["label_column"]
     target_count = int(params.get("target_count", 7000))
     random_state = int(params.get("random_state", 42))
+    requested_k_neighbors = int(params.get("k_neighbors", 5))
     feature_columns = parse_lines(params.get("feature_columns", ""))
+    class_targets_text = str(params.get("class_targets", "")).strip()
 
     try:
         from imblearn.over_sampling import SMOTE
@@ -504,22 +506,45 @@ def run_smote_balance(node: dict, context: dict[str, str], log: LogFn) -> dict:
 
     x = df[feature_columns].apply(pd.to_numeric, errors="coerce")
     y = df[label_column].astype(str)
+    if x.isna().any(axis=None):
+        missing_rows = int(x.isna().any(axis=1).sum())
+        raise ValueError(
+            f"SMOTE input contains missing or non-numeric features in {missing_rows} rows."
+        )
 
     counts = y.value_counts().to_dict()
-    sampling_strategy = {
-        label: target_count for label, count in counts.items() if count < target_count
-    }
+    sampling_strategy = {}
+    if class_targets_text:
+        # 中文注释：每行使用“类别=目标数”，只采样明确列出的少数类。
+        for line in class_targets_text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "=" not in stripped:
+                raise ValueError(f"Invalid class target line: {line!r}. Expected LABEL=COUNT.")
+            label, count_text = stripped.rsplit("=", 1)
+            label = label.strip()
+            if label not in counts:
+                raise ValueError(f"SMOTE target class not found in input: {label}")
+            requested_count = int(count_text.strip())
+            if requested_count > counts[label]:
+                sampling_strategy[label] = requested_count
+    else:
+        # 保留旧工作流兼容性：未指定逐类目标时使用统一目标数。
+        sampling_strategy = {
+            label: target_count for label, count in counts.items() if count < target_count
+        }
     if not sampling_strategy:
         log("All classes already satisfy the target count. Input copied to output.")
         ensure_parent(output_path)
         df.to_csv(output_path, index=False, encoding="utf-8-sig")
         return {"status": "completed", "output_path": str(output_path), "sampling_strategy": {}}
 
-    min_class_size = min(counts.values())
+    min_class_size = min(counts[label] for label in sampling_strategy)
     if min_class_size <= 1:
         raise RuntimeError("At least one class has <=1 sample; SMOTE cannot be applied safely.")
 
-    k_neighbors = min(5, min_class_size - 1)
+    k_neighbors = min(requested_k_neighbors, min_class_size - 1)
     smote = SMOTE(
         sampling_strategy=sampling_strategy,
         random_state=random_state,
@@ -532,11 +557,18 @@ def run_smote_balance(node: dict, context: dict[str, str], log: LogFn) -> dict:
     other_columns = [column for column in df.columns if column not in feature_columns + [label_column]]
     for column in other_columns:
         result[column] = pd.NA
+        result.loc[: len(df) - 1, column] = df[column].to_numpy()
 
     ensure_parent(output_path)
     result.to_csv(output_path, index=False, encoding="utf-8-sig")
+    log(f"SMOTE strategy: {sampling_strategy}")
     log(f"SMOTE output: {output_path} ({len(result)} rows)")
-    return {"status": "completed", "output_path": str(output_path), "rows": int(len(result))}
+    return {
+        "status": "completed",
+        "output_path": str(output_path),
+        "rows": int(len(result)),
+        "sampling_strategy": sampling_strategy,
+    }
 
 
 def run_anhydrous_normalize(node: dict, context: dict[str, str], log: LogFn) -> dict:

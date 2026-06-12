@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-# === ?????????? config/paths.py????????????===
-import sys as _cfg_sys
-from pathlib import Path as _cfg_Path
-_cfg_sys.path.insert(0, str(_cfg_Path(__file__).resolve().parents[1]))
-from config.paths import (
-    ARCHEAN_DIR, TRAIN_NORM_CSV, TEST_NORM_CSV,
-    MAIN_MODEL_WEIGHT, QUANTILE_PARAMS_JSON,
-)
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 标准库导入
 # ──────────────────────────────────────────────────────────────────────────────
+import sys
+import json
 import re
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +22,38 @@ import matplotlib.ticker as mticker
 import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
+
+# === 统一路径配置：所有数据/模型路径来自 config/paths.py ===
+import importlib.util as _importlib_util
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_PROJECT_ROOT / "06_archean_application"))
+sys.path.insert(0, str(_PROJECT_ROOT))
+from config.paths import (
+    ARCHEAN_S3_CSV, ARCHEAN_DATA_SUBDIR, ARCHEAN_CASE_DIR,
+    ARCHEAN_POOL_CSV, ARCHEAN_FINAL_DIR, ARCHEAN_FINAL_MASK_CSV,
+    ARCHEAN_FINAL_PREDICTIONS_CSV,
+    TRAIN_NORM_CSV, QUANTILE_PARAMS_JSON, MAIN_MODEL_WEIGHT,
+)
+
+from archean_s3_preprocess import preprocess_archean
+
+# 中文注释：04_model 目录以数字开头，无法用常规包导入，改用 importlib 加载训练脚本。
+_TRAINING_MODULE_FILE = _PROJECT_ROOT / "04_model" / "ablation_v4_vit_transformer.py"
+_TRAINING_MODULE_CACHE = None
+
+
+def _load_training_module():
+    """加载训练脚本模块，复用其中的正式列顺序与模型类，避免内联漂移。"""
+    global _TRAINING_MODULE_CACHE
+    if _TRAINING_MODULE_CACHE is None:
+        spec = _importlib_util.spec_from_file_location(
+            "ablation_v4_vit_transformer", str(_TRAINING_MODULE_FILE)
+        )
+        module = _importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _TRAINING_MODULE_CACHE = module
+    return _TRAINING_MODULE_CACHE
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SCI 绘图样式（按 v9 修订执行计划第六部分美化方案统一配置）
@@ -173,90 +198,14 @@ def _add_archean_period_bands(
 #  ★ 配置区：修改此处的路径和参数即可，无需命令行参数
 # ══════════════════════════════════════════════════════════════════════════════
 
-# 原始太古代玄武岩 CSV，仅用于报告记录；预测脚本不再读取 xlsx
-SOURCE_S3_CSV_PATH = (ARCHEAN_DIR / "data/archean_basalt.csv")
-
-# 预测输入版本开关：
-#   "imputed"   ：读取 MissForest 插补后的预处理输入
-#   "no_impute" ：读取不插补、缺失值为 0 的预处理输入
-#   "both"      ：两套都预测，便于对比
-PREDICT_PREPROCESS_VARIANT = "no_impute"
-
-# 插补版本预处理输入
-IMPUTED_PREPROCESSED_S3_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/preprocess_imputed/archean_s3_model_input.csv")
-IMPUTED_PREPROCESSED_FEATURES_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/preprocess_imputed/archean_features_quantile_1_255.csv")
-
-# 不插补版本预处理输入
-NO_IMPUTE_PREPROCESSED_S3_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/preprocess_no_impute/archean_s3_model_input.csv")
-NO_IMPUTE_PREPROCESSED_FEATURES_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/preprocess_no_impute/archean_features_quantile_1_255.csv")
+# 原始太古代玄武岩 CSV（Liu et al. 2024 原始数据，含 Arc_probability3 列）
+SOURCE_S3_CSV_PATH = Path(str(ARCHEAN_S3_CSV))
 
 # 训练集 CSV（用于读取类别名称顺序）：必须与当前权重训练时使用的 CSV 完全一致。
-TRAIN_PATH = TRAIN_NORM_CSV
-
-# 测试集 CSV（含真实标签，用于绘制 Coverage-Accuracy 曲线；设为 None 则跳过该步骤）
-TEST_PATH: Optional[Path] = TEST_NORM_CSV
-
-# 模型权重文件，支持传入多个以做集成推理（列表形式）
-# 可由 geodan_main_model.py 通过 GEODAN_MODEL_PATH 环境变量覆盖
-import os as _os_predict
-_default_weight = str(MAIN_MODEL_WEIGHT)
-_env_weight = _os_predict.environ.get('GEODAN_MODEL_PATH', _default_weight)
-WEIGHTS = [Path(_env_weight)]
-
-# 插补版本预测输出文件
-IMPUTED_OUTPUT_DIR = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed")
-IMPUTED_PROBABILITIES_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/archean_probabilities.npz")
-IMPUTED_PREDICTIONS_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/archean_s3_predictions.csv")
-IMPUTED_AGE_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/summary_age_bins_200myr.csv")
-IMPUTED_CRATON_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/summary_cratons.csv")
-IMPUTED_INDICATOR_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/summary_traditional_indicators_200myr.csv")
-IMPUTED_ANALYSIS_REPORT_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/analysis_report.md")
-IMPUTED_FIG_COVERAGE_ACCURACY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/fig_coverage_accuracy.png")
-IMPUTED_FIG_ARC_RATIO_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/fig_arc_ratio_by_age.png")
-IMPUTED_FIG_ARC_RATIO_SENSITIVITY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/fig_arc_ratio_sensitivity.png")
-IMPUTED_FIG_ARC_AFFINITY_MAP_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/fig_arc_affinity_global_map.png")
-IMPUTED_FIG_CLASS_STACK_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/fig_9class_stack_by_age.png")
-IMPUTED_FIG_KDE_RIDGELINE_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/tectonic_affinity_kde_ridgeline.png")
-IMPUTED_FIG_KDE_RIDGELINE_DATA_RANGE_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/tectonic_affinity_kde_ridgeline_data_age_range.png")
-IMPUTED_FIG_KDE_RIDGELINE_FULL_ZERO_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/tectonic_affinity_kde_ridgeline_full_archean_zero_edge.png")
-IMPUTED_FIG_INDICATOR_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_imputed/fig_traditional_indicators_by_age.png")
-
-# 不插补版本预测输出文件
-# NO_IMPUTE_OUTPUT_DIR = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute")
-# NO_IMPUTE_PROBABILITIES_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/archean_probabilities.npz")
-# NO_IMPUTE_PREDICTIONS_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/archean_s3_predictions.csv")
-# NO_IMPUTE_AGE_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/summary_age_bins_200myr.csv")
-# NO_IMPUTE_CRATON_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/summary_cratons.csv")
-# NO_IMPUTE_INDICATOR_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/summary_traditional_indicators_200myr.csv")
-# NO_IMPUTE_ANALYSIS_REPORT_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/analysis_report.md")
-# NO_IMPUTE_FIG_COVERAGE_ACCURACY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_coverage_accuracy.png")
-# NO_IMPUTE_FIG_ARC_RATIO_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_arc_ratio_by_age.png")
-# NO_IMPUTE_FIG_CLASS_STACK_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_9class_stack_by_age.png")
-# NO_IMPUTE_FIG_INDICATOR_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_traditional_indicators_by_age.png")
-
-NO_IMPUTE_OUTPUT_DIR = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute")
-NO_IMPUTE_PROBABILITIES_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/archean_probabilities.npz")
-NO_IMPUTE_PREDICTIONS_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/archean_s3_predictions.csv")
-NO_IMPUTE_AGE_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/summary_age_bins_200myr.csv")
-NO_IMPUTE_CRATON_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/summary_cratons.csv")
-NO_IMPUTE_INDICATOR_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/summary_traditional_indicators_200myr.csv")
-NO_IMPUTE_ANALYSIS_REPORT_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/analysis_report.md")
-NO_IMPUTE_FIG_COVERAGE_ACCURACY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_coverage_accuracy.png")
-NO_IMPUTE_FIG_ARC_RATIO_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_arc_ratio_by_age.png")
-NO_IMPUTE_FIG_ARC_RATIO_SENSITIVITY_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_arc_ratio_sensitivity.png")
-NO_IMPUTE_FIG_ARC_AFFINITY_MAP_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_arc_affinity_global_map.png")
-NO_IMPUTE_FIG_CLASS_STACK_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_9class_stack_by_age.png")
-NO_IMPUTE_FIG_KDE_RIDGELINE_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/tectonic_affinity_kde_ridgeline.png")
-NO_IMPUTE_FIG_KDE_RIDGELINE_DATA_RANGE_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/tectonic_affinity_kde_ridgeline_data_age_range.png")
-NO_IMPUTE_FIG_KDE_RIDGELINE_FULL_ZERO_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/tectonic_affinity_kde_ridgeline_full_archean_zero_edge.png")
-NO_IMPUTE_FIG_INDICATOR_PATH = (ARCHEAN_DIR / "outputs/vit_transformer_v1/prediction_no_impute/fig_traditional_indicators_by_age.png")
-# 模型版本：'v1' 或 'v2'
+TRAIN_PATH = Path(str(TRAIN_NORM_CSV))
 
 # 推理批次大小
 BATCH_SIZE = 256
-
-# 模型标识（仅用于 RunConfig 字段记录，实际架构固定为 ViT-Transformer Dual-Stream）
-MODEL_VERSION = "vit_dualstream"
 
 # 置信度阈值：softmax 最大值 >= HIGH_PROB 且 std <= HIGH_STD 才算"高置信度"
 HIGH_PROB = 0.5
@@ -268,65 +217,12 @@ MAIN_ARC_RATIO_THRESHOLD = 0.7
 # 年龄分箱大小（单位：Ma，百万年）
 BIN_SIZE_MYR = 200
 
-# 是否跳过模型推理（仅检查预处理输入时使用）
-SKIP_MODEL = False
-
-# 当前环境没有 PyTorch 时，是否复用已保存的概率文件重新生成预测和统计结果。
-REUSE_EXISTING_PROBABILITIES = True
-
-# 旧概率文件只保存了概率矩阵；若其中 class_names 元数据来自错误 CSV，则按当前 TRAIN_PATH 顺序重新解释概率。
-TRUST_CURRENT_CLASS_ORDER_FOR_EXISTING_PROBS = True
-
-# Coverage-Accuracy 曲线只作为测试集诊断；太古代应用数据默认使用固定 HIGH_PROB。
-USE_COVERAGE_RECOMMENDED_THRESHOLD = False
-
 # 板块构造过渡期（Brown et al., 2020），用于 plot_arc_ratio 灰色背景带
 PT_TRANSITION_GA = (2.5, 3.2)
-
-# ── 输出文件精简开关 ─────────────────────────────────────────────────────────
-# 是否保存 archean_probabilities.npz（仅用于 PyTorch 不可用时复用预测结果；通常不需要）
-SAVE_PROBABILITIES = False
-# 是否保存 analysis_report.md（多数信息已在 CSV 汇总中，通常不需要）
-SAVE_ANALYSIS_REPORT = False
 
 # ── 9 类补充可视化开关 ─────────────────────────────────────────────────────
 PLOT_CLASS_KDE_RIDGELINE = True # KDE 山脊图 — 看不同构造环境随年龄变化的相对丰度
 PLOT_CLASS_BUBBLE_MATRIX = True # 气泡矩阵 — 类别 × age bin 的稀疏可视化
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ★ 案例研究配置（6 个克拉通案例）
-# ══════════════════════════════════════════════════════════════════════════════
-
-# 是否运行案例研究预测（True 时除 Liu 2024 全球数据集外，还会预测 6 个案例 CSV）
-RUN_CASE_STUDIES = True
-
-# 案例预处理输出根目录（与 archean_s3_preprocess.py 中的 CASE_STUDY_OUTPUT_ROOT 一致）
-CASE_STUDY_PREPROCESS_ROOT = (ARCHEAN_DIR / "outputs/vit_transformer_v1/case_studies")
-
-# 案例预测输出根目录
-CASE_STUDY_OUTPUT_ROOT = (ARCHEAN_DIR / "outputs/vit_transformer_v1/case_studies_prediction")
-
-# 案例顺序按地质年龄从老到新；与 archean_s3_preprocess.py 中的 CASE_STUDIES 保持同步
-# (case_dir_name, case_title, approx_age_ga) — case_dir_name 必须与预处理脚本里的目录名一致
-CASE_STUDIES_ORDER: list[tuple[str, str, float]] = [
-    ("Isua",               "Isua",                 3.75),  # Isua / West Greenland
-    ("Barberton",          "Barberton",            3.46),  # Barberton / Kaapvaal
-    ("Pilbara",            "Pilbara",              3.38),  # Pilbara 整体，替代 Cleaverville + Whundo
-    ("Belingwe_Zimbabwe",  "Belingwe Zimbabwe",    2.87),  # Belingwe + Zimbabwe
-    ("Superior_Abitibi",   "Superior Abitibi",     2.72),  # Superior，含 Abitibi
-    ("North_China_Craton", "North China Craton",   2.54),  # North China Craton，含 Wutai 等
-]
-
-# 方便把内部目录名转换成对外展示标题
-CASE_STUDY_TITLES = {case_id: case_title for case_id, case_title, _ in CASE_STUDIES_ORDER}
-
-# 案例研究综合图保存路径
-CASE_FIG_BARS_PATH    = CASE_STUDY_OUTPUT_ROOT / "fig_case_bars_6panel.png"
-CASE_FIG_HEATMAP_PATH = CASE_STUDY_OUTPUT_ROOT / "fig_case_heatmap_6x9.png"
-CASE_FIG_STACKED_PATH = CASE_STUDY_OUTPUT_ROOT / "fig_case_stacked_100pct.png"
-CASE_SUMMARY_CSV_PATH = CASE_STUDY_OUTPUT_ROOT / "case_studies_summary.csv"
-
-# ══════════════════════════════════════════════════════════════════════════════
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -334,7 +230,7 @@ CASE_SUMMARY_CSV_PATH = CASE_STUDY_OUTPUT_ROOT / "case_studies_summary.csv"
 # 可由环境变量 GEODAN_COLUMN_SCHEME 覆盖（geodan_main_model.py 训练后自动设置）
 # ──────────────────────────────────────────────────────────────────────────────
 
-_COLUMN_ORDER_SCHEME = _os_predict.environ.get('GEODAN_COLUMN_SCHEME', 'v1')
+_COLUMN_ORDER_SCHEME = "v1"
 
 # v1: 矩阵分支 — 元素周期表顺序
 _COLUMNS_IMG_V1 = [
@@ -402,41 +298,6 @@ CASE_BAR_COLORS = {
 }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 运行配置数据类
-# ──────────────────────────────────────────────────────────────────────────────
-
-@dataclass(frozen=True)
-class RunConfig:
-    preprocess_variant: str
-    source_s3_csv_path: Path
-    preprocessed_s3_path: Path
-    preprocessed_features_path: Path
-    train_path: Path
-    test_path: Optional[Path]   # 测试集路径，用于 Coverage-Accuracy 曲线；None 则跳过
-    weights: list[Path]
-    output_dir: Path
-    probabilities_path: Path
-    predictions_path: Path
-    age_summary_path: Path
-    craton_summary_path: Path
-    indicator_summary_path: Path
-    analysis_report_path: Path
-    fig_coverage_accuracy_path: Path
-    fig_arc_ratio_path: Path
-    fig_class_stack_path: Path
-    fig_indicator_path: Path
-    model_version: str
-    batch_size: int
-    high_prob: float
-    high_std: float
-    bin_size_myr: int
-    skip_model: bool
-    reuse_existing_probabilities: bool
-    trust_current_class_order_for_existing_probs: bool
-    use_coverage_recommended_threshold: bool
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  模型架构定义（完整内联，无需外部 .py 文件）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -462,15 +323,27 @@ _COLUMNS_SEQ_V2 = [
 ]
 COLUMNS_ELECTRODE_ORDER = _COLUMNS_SEQ_V2 if _COLUMN_ORDER_SCHEME == 'v2' else _COLUMNS_SEQ_V1
 
+# 中文注释：v1正式预测严格复用训练脚本中的矩阵与序列列顺序。
+if _COLUMN_ORDER_SCHEME == "v1":
+    _training_module = _load_training_module()
+
+    COLUMNS_TO_EXTRACT = list(_training_module.ORIGINAL_IMAGE_COLUMNS)
+    COLUMNS_ELECTRODE_ORDER = list(_training_module.COLUMNS_ELECTRODE_ORDER_V1)
+
 
 def reshape_to_image(X_2d: np.ndarray) -> np.ndarray:
     """将 (N, 36) 特征矩阵重塑为 CNN 输入格式 (N, 1, 6, 6)，归一化区间为 [0, 1]。"""
     return X_2d.reshape(-1, 1, 6, 6).astype(np.float32)
 
 
-def _build_model(num_classes: int):
-    """实例化 ViT-Transformer Dual-Stream 模型（不含权重加载）。"""
-    return ViT_Transformer_DualStream(num_classes=num_classes)
+def _build_model(num_classes: int, use_missing_mask: bool = False):
+    """直接实例化训练脚本中的正式模型类，避免内联参数与权重漂移。"""
+    CurrentGeoDAN = _load_training_module().ViT_Transformer_DualStream
+
+    return CurrentGeoDAN(
+        num_classes=num_classes,
+        use_missing_mask=use_missing_mask,
+    )
 
 
 try:
@@ -522,9 +395,9 @@ try:
           融合:    vit_cls + vit_gap + seq_cls + seq_gap → MLP 分类头
         """
         def __init__(self, num_classes: int, input_size: int = 6, patch_size: int = 2,
-                     embed_dim: int = 96, num_heads: int = 8,
-                     transformer_layers: int = 2, ff_dim: int = 192,
-                     dropout: float = 0.1) -> None:
+                     embed_dim: int = 128, num_heads: int = 8,
+                     transformer_layers: int = 2, ff_dim: int = 256,
+                     dropout: float = 0.15) -> None:
             super().__init__()
             self.num_patches = (input_size // patch_size) ** 2   # 9 patches
             self.seq_len     = input_size * input_size           # 36 tokens
@@ -632,38 +505,13 @@ def load_class_names(train_path: Path) -> list[str]:
     return list(unique)
 
 
-def load_preprocessed_archean_data(config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    读取 archean_s3_preprocess.py 生成的预测输入。
-    s3_model 保留原始样品信息，normalized 是已经插补并 quantile 到 1~255 的36维特征。
-    """
-    if not config.preprocessed_s3_path.exists():
-        raise FileNotFoundError(
-            f"未找到预处理后的样品表: {config.preprocessed_s3_path}\n"
-            "请先运行 predict_archean/archean_s3_preprocess.py"
-        )
-    if not config.preprocessed_features_path.exists():
-        raise FileNotFoundError(
-            f"未找到预处理后的特征表: {config.preprocessed_features_path}\n"
-            "请先运行 predict_archean/archean_s3_preprocess.py"
-        )
-
-    s3_model = read_csv_fallback(config.preprocessed_s3_path)
-    normalized = read_csv_fallback(config.preprocessed_features_path)
-    if len(s3_model) != len(normalized):
-        raise ValueError(
-            "预处理样品表与特征表行数不一致: "
-            f"{len(s3_model)} != {len(normalized)}"
-        )
-    return s3_model, normalized[COLUMNS_TO_EXTRACT].copy()
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 模型推理（使用内联模型类，无需外部脚本）
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_model_inputs(
     normalized: pd.DataFrame,
+    missing_mask: Optional[pd.DataFrame] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     将 quantile 变换后的表格数据（0~255）转换为模型所需的两路输入：
@@ -674,6 +522,37 @@ def build_model_inputs(
     x_seq_2d = normalized[COLUMNS_ELECTRODE_ORDER].to_numpy(dtype=np.float32)
     x_img    = reshape_to_image(x_img_2d / 255.0)
     x_seq    = (x_seq_2d / 255.0)[:, :, np.newaxis].astype(np.float32)
+
+    if missing_mask is not None:
+        image_mask_columns = [
+            f"missing_mask__{column}" for column in COLUMNS_TO_EXTRACT
+        ]
+        sequence_mask_columns = [
+            f"missing_mask__{column}" for column in COLUMNS_ELECTRODE_ORDER
+        ]
+        missing_columns = [
+            column
+            for column in set(image_mask_columns + sequence_mask_columns)
+            if column not in missing_mask.columns
+        ]
+        if missing_columns:
+            raise ValueError(
+                f"太古代缺失mask缺少列: {sorted(missing_columns)}"
+            )
+        if len(missing_mask) != len(normalized):
+            raise ValueError(
+                f"太古代缺失mask行数不一致: "
+                f"{len(missing_mask)} != {len(normalized)}"
+            )
+
+        x_img_mask = reshape_to_image(
+            missing_mask[image_mask_columns].to_numpy(dtype=np.float32)
+        )
+        x_seq_mask = missing_mask[
+            sequence_mask_columns
+        ].to_numpy(dtype=np.float32)[:, :, np.newaxis]
+        x_img = np.concatenate([x_img, x_img_mask], axis=1)
+        x_seq = np.concatenate([x_seq, x_seq_mask], axis=2)
     return x_img, x_seq
 
 
@@ -689,75 +568,6 @@ def _load_weights(weight_path: Path, model, device):
         state = state["model_state_dict"]
     model.load_state_dict(state)
     return model
-
-
-def predict_probabilities(
-    normalized: pd.DataFrame,
-    class_names: list[str],
-    config: RunConfig,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    使用 CNN-ViT-Transformer 模型对太古代样品进行推理，返回 softmax 概率。
-
-    支持多权重集成（model ensemble）：对 config.weights 中的每个权重文件分别推理，
-    最终返回各权重结果的均值（probs_mean）和标准差（probs_std）。
-
-    返回：
-      probs_mean: shape (N, num_classes)，各类别平均概率
-      probs_std:  shape (N, num_classes)，各类别概率标准差（集成不确定性）
-    """
-    if not _TORCH_AVAILABLE:
-        raise RuntimeError("模型推理需要 PyTorch。请激活训练时使用的 Python 环境。")
-
-    from torch.utils.data import DataLoader, TensorDataset
-
-    x_img, x_seq = build_model_inputs(normalized)
-    loader = DataLoader(
-        TensorDataset(torch.FloatTensor(x_img), torch.FloatTensor(x_seq)),
-        batch_size=config.batch_size,
-        shuffle=False,
-    )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"      使用设备: {device}")
-
-    all_weight_probs: list[np.ndarray] = []
-    for weight_path in config.weights:
-        model = _build_model(len(class_names)).to(device)
-        model = _load_weights(weight_path, model, device)
-        model.eval()
-
-        probs_parts: list[np.ndarray] = []
-        with torch.no_grad():
-            for batch_img, batch_seq in loader:
-                logits = model(batch_img.to(device), batch_seq.to(device))
-                probs_parts.append(F.softmax(logits, dim=1).cpu().numpy())
-        all_weight_probs.append(np.concatenate(probs_parts, axis=0))
-
-    probs_stack = np.stack(all_weight_probs, axis=0)  # (W, N, C)
-    return probs_stack.mean(axis=0), probs_stack.std(axis=0)
-
-
-def load_existing_probabilities(config: RunConfig, class_names: list[str], n_samples: int) -> tuple[np.ndarray, np.ndarray]:
-    """当前环境无法推理时，读取已经保存的概率文件来重新生成预测统计。"""
-    if not config.probabilities_path.exists():
-        raise FileNotFoundError(f"未找到已有概率文件: {config.probabilities_path}")
-
-    data = np.load(config.probabilities_path, allow_pickle=True)
-    probs_mean = data["probs_mean"]
-    probs_std = data["probs_std"]
-    saved_class_names = [str(x) for x in data["class_names"].tolist()]
-
-    if saved_class_names != class_names and not config.trust_current_class_order_for_existing_probs:
-        raise ValueError("已有概率文件中的类别顺序与训练集类别顺序不一致。")
-    if saved_class_names != class_names:
-        print("      已有概率文件的 class_names 元数据与当前训练集顺序不同，按当前 TRAIN_PATH 顺序解释概率矩阵。")
-    if len(probs_mean) != n_samples:
-        raise ValueError(
-            "已有概率文件行数与预处理样品数不一致: "
-            f"{len(probs_mean)} != {n_samples}"
-        )
-    return probs_mean, probs_std
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -780,6 +590,16 @@ def add_prediction_columns(
       medium → pred_prob_max >= 0.5
       low    → 其余
     """
+    # 确保输入数组长度与 DataFrame 一致
+    if len(probs_mean) != len(s3):
+        raise ValueError(
+            f"probs_mean length ({len(probs_mean)}) does not match s3 DataFrame length ({len(s3)})"
+        )
+    if len(probs_std) != len(s3):
+        raise ValueError(
+            f"probs_std length ({len(probs_std)}) does not match s3 DataFrame length ({len(s3)})"
+        )
+    
     out      = s3.copy()
     pred_idx = probs_mean.argmax(axis=1)
     max_prob = probs_mean.max(axis=1)
@@ -790,13 +610,6 @@ def add_prediction_columns(
     out["pred_prob_max"]         = max_prob
     out["pred_prob_std"]         = pred_std
     out["is_arc_related_9class"] = out["pred_class_name"].isin(ARC_RELATED_LABELS)
-
-    # Arc_probability3 仅 Liu 2024 全球数据集有；案例 CSV 没有这列。
-    # 缺列时填 False，避免下游 summarize_by_age / summarize_cratons 出错。
-    if "Arc_probability3" in out.columns:
-        out["liu_arc_binary"] = pd.to_numeric(out["Arc_probability3"], errors="coerce") >= 0.5
-    else:
-        out["liu_arc_binary"] = False
 
     out["confidence_tier"] = np.select(
         [
@@ -812,6 +625,27 @@ def add_prediction_columns(
         safe = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
         out[f"prob_{safe}"]     = probs_mean[:, i]
         out[f"prob_std_{safe}"] = probs_std[:, i]
+
+    # 中文注释：公开数据中的弧概率统一使用最新模型三类弧环境概率之和。
+    arc_indices = [
+        index for index, name in enumerate(class_names)
+        if name in ARC_RELATED_LABELS
+    ]
+    out["Arc_probability3"] = probs_mean[:, arc_indices].sum(axis=1)
+    
+    # Liu 2024 基线：优先使用原始数据中的 Liu2024_Arc_probability3（如果存在），
+    # 否则回退到当前模型预测的 Arc_probability3
+    if "Liu2024_Arc_probability3" in out.columns:
+        liu_probability = pd.to_numeric(
+            out["Liu2024_Arc_probability3"], errors="coerce"
+        )
+        # 中文注释：未匹配到 Liu 原始预测的样品必须保持缺失，不能当作非弧样品。
+        out["liu_arc_binary"] = liu_probability.ge(0.5).where(
+            liu_probability.notna()
+        )
+    else:
+        print("      [警告] 未找到 Liu2024_Arc_probability3 列，liu_arc_binary 将使用当前模型预测")
+        out["liu_arc_binary"] = out["Arc_probability3"].ge(0.5)
 
     return out
 
@@ -838,11 +672,57 @@ def add_age_bins(df: pd.DataFrame, bin_size_myr: int) -> pd.DataFrame:
     return out
 
 
+def summarize_liu_baseline_by_age(
+    source_path: Path,
+    bin_size_myr: int,
+) -> pd.DataFrame:
+    """直接从 Liu 原始数据按年龄分箱统计 Arc_probability3 >= 0.5 的比例。"""
+    liu = read_csv_fallback(source_path)
+    required_columns = {"C_AGE", "Arc_probability3"}
+    missing_columns = required_columns.difference(liu.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Liu 原始数据缺少必要列: {sorted(missing_columns)}"
+        )
+
+    liu_direct = pd.DataFrame({
+        "C_AGE": pd.to_numeric(liu["C_AGE"], errors="coerce"),
+        "Liu2024_Arc_probability3": pd.to_numeric(
+            liu["Arc_probability3"], errors="coerce"
+        ),
+    }).dropna(subset=["C_AGE", "Liu2024_Arc_probability3"])
+    liu_direct = add_age_bins(liu_direct, bin_size_myr)
+
+    rows = []
+    for interval, group in liu_direct.dropna(subset=["age_bin"]).groupby(
+        "age_bin", observed=True
+    ):
+        arc_count = int(group["Liu2024_Arc_probability3"].ge(0.5).sum())
+        rows.append({
+            "age_mid_ga": interval.mid / 1000.0,
+            "n_liu_samples": len(group),
+            "n_liu_arc": arc_count,
+            "ratio_liu_arc": _safe_ratio(arc_count, len(group)),
+        })
+
+    print(
+        f"      Liu 原始曲线直接读取: {source_path}，"
+        f"有效样品 {len(liu_direct)}"
+    )
+    return pd.DataFrame(rows).sort_values("age_mid_ga", ascending=False)
+
+
 def summarize_by_age(df: pd.DataFrame, class_names: list[str]) -> pd.DataFrame:
     """按年龄分箱统计各时段的样品数量、弧相关比例、Liu 2024 对比等指标，降序排列。"""
     rows = []
     for interval, group in df.dropna(subset=["age_bin"]).groupby("age_bin", observed=True):
         high = group[group["is_high_confidence"]]
+        
+        # Liu 2024 基线统计（只统计有 Liu 预测值的样品）
+        liu_valid = group[group["liu_arc_binary"].notna()]
+        n_liu_arc = int(liu_valid["liu_arc_binary"].sum()) if len(liu_valid) > 0 else 0
+        ratio_liu_arc = _safe_ratio(n_liu_arc, len(liu_valid))
+        
         row  = {
             "age_bin":               f"{interval.left:.0f}–{interval.right:.0f} Ma",
             "age_mid_ga":            interval.mid / 1000.0,
@@ -850,10 +730,19 @@ def summarize_by_age(df: pd.DataFrame, class_names: list[str]) -> pd.DataFrame:
             "n_high":                len(high),
             "n_9class_arc_all":      int(group["is_arc_related_9class"].sum()),
             "ratio_9class_arc_all":  _safe_ratio(group["is_arc_related_9class"].sum(), len(group)),
+            "mean_arc_probability":  pd.to_numeric(
+                group["Arc_probability3"],
+                errors="coerce",
+            ).mean(),
+            "ratio_arc_probability_ge_0_5": pd.to_numeric(
+                group["Arc_probability3"],
+                errors="coerce",
+            ).ge(0.5).mean(),
             "n_9class_arc_high":     int(high["is_arc_related_9class"].sum()),
             "ratio_9class_arc_high": _safe_ratio(high["is_arc_related_9class"].sum(), len(high)),
-            "n_liu_arc":             int(group["liu_arc_binary"].sum()),
-            "ratio_liu_arc":         _safe_ratio(group["liu_arc_binary"].sum(), len(group)),
+            "n_liu_samples":         len(liu_valid),
+            "n_liu_arc":             n_liu_arc,
+            "ratio_liu_arc":         ratio_liu_arc,
             "mean_pred_prob":        group["pred_prob_max"].mean(),
         }
         for name in class_names:
@@ -1125,6 +1014,7 @@ def plot_arc_ratio(
     df: pd.DataFrame,
     probs_mean: np.ndarray,
     age_summary: pd.DataFrame,
+    liu_age_summary: pd.DataFrame,
     output_path: Path,
     high_threshold: float = MAIN_ARC_RATIO_THRESHOLD,
     high_std: float = HIGH_STD,
@@ -1153,6 +1043,9 @@ def plot_arc_ratio(
     threshold_visible = threshold_summary["age_mid_ga"] >= 2.5
     x_high = threshold_summary.loc[threshold_visible, "age_mid_ga"].to_numpy(dtype=float)
     y_high = threshold_summary.loc[threshold_visible, "ratio_arc"].to_numpy(dtype=float)
+    liu_visible = liu_age_summary["age_mid_ga"] >= 2.5
+    x_liu = liu_age_summary.loc[liu_visible, "age_mid_ga"].to_numpy(dtype=float)
+    y_liu = liu_age_summary.loc[liu_visible, "ratio_liu_arc"].to_numpy(dtype=float)
 
     # ── 1. 先画板块构造过渡期背景带（zorder=0，置于所有曲线下方） ────────────
     band_low, band_high = PT_TRANSITION_GA
@@ -1172,15 +1065,15 @@ def plot_arc_ratio(
     # ── 2. 三条曲线 ──────────────────────────────────────────────────────────
     data_series = [
         (x,
-         plot_summary["ratio_9class_arc_all"].to_numpy(dtype=float),
-         "All samples",
+         plot_summary["mean_arc_probability"].to_numpy(dtype=float),
+         "Mean arc probability",
          _ARC_LINE_STYLES[0]),
         (x_high,
          y_high,
-         f"High-confidence ≥ {high_threshold:.1f}",
+         f"Samples with P$_{{arc}}$ ≥ {high_threshold:.1f}",
          _ARC_LINE_STYLES[1]),
-        (x,
-         plot_summary["ratio_liu_arc"].to_numpy(dtype=float),
+        (x_liu,
+         y_liu,
          "Liu et al., 2024 ( ≥ 0.5)",
          _ARC_LINE_STYLES[2]),
     ]
@@ -1248,28 +1141,26 @@ def _compute_arc_ratio_by_threshold(
     high_std: float = HIGH_STD,
 ) -> pd.DataFrame:
     """
-    对给定概率阈值筛选高置信样品，返回每个年龄分箱的弧相关比例。
-    不依赖 add_prediction_columns 已有的 is_high_confidence 列，而是用 probs_mean 重新计算。
-    """
-    max_prob = probs_mean.max(axis=1)
-    pred_std = pd.to_numeric(df["pred_prob_std"], errors="coerce").to_numpy(dtype=float)
-    # 中文注释：敏感性分析只改变概率阈值，std 稳定性条件保持不变。
-    mask     = (max_prob >= threshold) & (pred_std <= high_std)
+    统计每个年龄分箱中 Arc_probability3 达到阈值的样品比例。
 
+    中文注释：分母始终是该年龄箱全部样品，阈值作用于三类弧概率之和，
+    与“高弧样品 Arc_probability3 >= threshold”的汇总口径完全一致。
+    """
     sub = df.copy()
-    sub["_above_thresh"] = mask
+    arc_probability = pd.to_numeric(
+        sub["Arc_probability3"],
+        errors="coerce",
+    )
+    sub["_above_thresh"] = arc_probability.ge(threshold)
 
     rows = []
     for interval, group in sub.dropna(subset=["age_bin"]).groupby("age_bin", observed=True):
-        hi = group[group["_above_thresh"]]
-        if len(hi) == 0:
-            ratio = np.nan
-        else:
-            ratio = hi["is_arc_related_9class"].sum() / len(hi)
+        high_count = int(group["_above_thresh"].sum())
+        ratio = _safe_ratio(high_count, len(group))
         rows.append({
             "age_mid_ga": interval.mid / 1000.0,
             "ratio_arc":  ratio,
-            "n_high":     len(hi),
+            "n_high":     high_count,
         })
     return pd.DataFrame(rows).sort_values("age_mid_ga")
 
@@ -2116,6 +2007,7 @@ def plot_main_composite_figure(
     class_names: list[str],
     probs_mean: np.ndarray,
     age_summary: pd.DataFrame,
+    liu_age_summary: pd.DataFrame,
     indicator_summary: pd.DataFrame,
     output_path: Path,
     *,
@@ -2209,6 +2101,9 @@ def plot_main_composite_figure(
     thr_vis = thr_summary["age_mid_ga"] >= 2.5
     x_high = thr_summary.loc[thr_vis, "age_mid_ga"].to_numpy(dtype=float)
     y_high = thr_summary.loc[thr_vis, "ratio_arc"].to_numpy(dtype=float)
+    liu_vis = liu_age_summary["age_mid_ga"] >= 2.5
+    x_liu = liu_age_summary.loc[liu_vis, "age_mid_ga"].to_numpy(dtype=float)
+    y_liu = liu_age_summary.loc[liu_vis, "ratio_liu_arc"].to_numpy(dtype=float)
 
     _main_transition_markers(ax_b)
     ax_b.text(
@@ -2218,10 +2113,10 @@ def plot_main_composite_figure(
         style="italic", transform=ax_b.get_xaxis_transform(), zorder=2,
     )
     b_series = [
-        (x, plot_summary["ratio_9class_arc_all"].to_numpy(dtype=float),
-         "All samples", _ARC_LINE_STYLES[0]),
-        (x_high, y_high, f"High-confidence ≥ {high_threshold:.1f}", _ARC_LINE_STYLES[1]),
-        (x, plot_summary["ratio_liu_arc"].to_numpy(dtype=float),
+        (x, plot_summary["mean_arc_probability"].to_numpy(dtype=float),
+         "Mean arc probability", _ARC_LINE_STYLES[0]),
+        (x_high, y_high, f"Samples with P$_{{arc}}$ ≥ {high_threshold:.1f}", _ARC_LINE_STYLES[1]),
+        (x_liu, y_liu,
          "Liu et al., 2024 ( ≥ 0.5)", _ARC_LINE_STYLES[2]),
     ]
     for x_v, y_v, label, sty in b_series:
@@ -2300,111 +2195,122 @@ def plot_main_composite_figure(
 #  案例研究预测（6 个克拉通案例）
 # ══════════════════════════════════════════════════════════════════════════════
 
+CASE_STUDIES_ORDER = [
+    ("Isua", "Isua", 3.75),
+    ("Barberton", "Barberton", 3.45),
+    ("Pilbara", "Pilbara", 3.30),
+    ("Belingwe", "Belingwe", 2.80),
+    ("Abitibi", "Abitibi", 2.70),
+    ("North_China_Craton", "North China Craton", 2.55),
+]
+CASE_STUDY_TITLES = {
+    case_label: case_title
+    for case_label, case_title, _ in CASE_STUDIES_ORDER
+}
+CASE_STUDY_OUTPUT_ROOT = Path(str(ARCHEAN_CASE_DIR))
+CASE_RAW_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / "raw"
+CASE_PREPROCESSED_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / "preprocessed"
+CASE_PREDICTIONS_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / "predictions"
+CASE_SUMMARY_CSV_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "case_study_summary.csv"
+CASE_FIG_BARS_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "fig_case_studies_bars.png"
+CASE_FIG_HEATMAP_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "fig_case_studies_heatmap.png"
+CASE_FIG_STACKED_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "fig_case_studies_stacked.png"
+
+# 6 克拉通案例原始数据目录（与 Liu 数据同放在 data/archean/data 下）
+CASE_SOURCE_DIR = Path(str(ARCHEAN_DATA_SUBDIR))
+
 
 @dataclass(frozen=True)
 class CaseStudyConfig:
-    """单个案例的预测配置，由 build_case_study_configs 自动生成。"""
+    """单个绿岩带案例的原始数据和输出配置。"""
     case_label: str
     case_title: str
     approx_age_ga: float
-    preprocessed_s3_path: Path
-    preprocessed_features_path: Path
+    source_path: Path
+    raw_output_path: Path
+    preprocessed_path: Path
     predictions_path: Path
 
 
 def build_case_study_configs() -> list[CaseStudyConfig]:
-    """
-    根据 CASE_STUDIES_ORDER 与 CASE_STUDY_PREPROCESS_ROOT 自动生成 6 个案例的预测配置。
+    """生成六个案例的显式配置，分别保存原始、预处理和预测结果。"""
 
-    要求：archean_s3_preprocess.py 已运行过 RUN_CASE_STUDIES=True 模式，
-    每个案例的预处理输出位于 CASE_STUDY_PREPROCESS_ROOT / {case_label} /。
-    """
-    configs: list[CaseStudyConfig] = []
-    for case_label, case_title, age_ga in CASE_STUDIES_ORDER:
-        preprocess_dir = CASE_STUDY_PREPROCESS_ROOT / case_label
-        configs.append(CaseStudyConfig(
-            case_label=case_label,
-            case_title=case_title,
-            approx_age_ga=age_ga,
-            preprocessed_s3_path=preprocess_dir / "s3_model_input.csv",
-            preprocessed_features_path=preprocess_dir / "features_quantile_1_255.csv",
-            predictions_path=CASE_STUDY_OUTPUT_ROOT / f"{case_label}_predictions.csv",
-        ))
-    return configs
+    def _case(case_label: str, case_title: str, approx_age_ga: float,
+              source_name: str) -> CaseStudyConfig:
+        return CaseStudyConfig(
+            case_label, case_title, approx_age_ga,
+            CASE_SOURCE_DIR / source_name,
+            CASE_RAW_OUTPUT_DIR / f"{case_label}_raw.csv",
+            CASE_PREPROCESSED_OUTPUT_DIR / f"{case_label}_preprocessed.csv",
+            CASE_PREDICTIONS_OUTPUT_DIR / f"{case_label}_predictions.csv",
+        )
+
+    return [
+        _case("Isua", "Isua", 3.75, "Isua.csv"),
+        _case("Barberton", "Barberton", 3.45, "Barberton.csv"),
+        _case("Pilbara", "Pilbara", 3.30, "Pilbara.csv"),
+        _case("Belingwe", "Belingwe", 2.80, "Belingwe_Zimbabwe.csv"),
+        _case("Abitibi", "Abitibi", 2.70, "Superior_Abitibi.csv"),
+        _case("North_China_Craton", "North China Craton", 2.55, "North_China_Craton.csv"),
+    ]
 
 
 def predict_one_case(
     case_config: CaseStudyConfig,
     class_names: list[str],
-    weights: list[Path],
-    model_version: str,
-    batch_size: int,
-    high_prob: float,
-    high_std: float,
 ) -> Optional[pd.DataFrame]:
-    """
-    对单个案例执行模型推理并写入预测 CSV。
-
-    返回带预测列的 DataFrame；若预处理输出缺失则返回 None。
-    """
-    if not case_config.preprocessed_s3_path.exists():
-        print(f"  ⚠ [{case_config.case_label}] 缺少预处理样品表: "
-              f"{case_config.preprocessed_s3_path}")
-        return None
-    if not case_config.preprocessed_features_path.exists():
-        print(f"  ⚠ [{case_config.case_label}] 缺少预处理特征表: "
-              f"{case_config.preprocessed_features_path}")
+    """保存案例原始表，严格预处理后再用缺失编码模型执行预测。"""
+    if not case_config.source_path.exists():
+        print(f"  [警告] 缺少案例数据: {case_config.source_path}")
         return None
 
-    case_config.predictions_path.parent.mkdir(parents=True, exist_ok=True)
-
-    s3 = read_csv_fallback(case_config.preprocessed_s3_path)
-    feat = read_csv_fallback(case_config.preprocessed_features_path)
-    if len(s3) != len(feat):
-        raise ValueError(f"[{case_config.case_label}] s3 与 features 行数不一致")
-    if len(s3) == 0:
-        print(f"  ⚠ [{case_config.case_label}] 没有样品通过预处理过滤，跳过。")
-        return None
-
-    feat_36 = feat[COLUMNS_TO_EXTRACT].copy()
-
-    # 用 RunConfig 临时承载推理参数（复用 predict_probabilities）
-    tmp_cfg = RunConfig(
-        preprocess_variant="case_study",
-        source_s3_csv_path=case_config.preprocessed_s3_path,
-        preprocessed_s3_path=case_config.preprocessed_s3_path,
-        preprocessed_features_path=case_config.preprocessed_features_path,
-        train_path=Path(),  # 案例预测不需要 train_path
-        test_path=None,
-        weights=weights,
-        output_dir=case_config.predictions_path.parent,
-        probabilities_path=case_config.predictions_path.parent / f"{case_config.case_label}_probs.npz",
-        predictions_path=case_config.predictions_path,
-        age_summary_path=Path(), craton_summary_path=Path(),
-        indicator_summary_path=Path(), analysis_report_path=Path(),
-        fig_coverage_accuracy_path=Path(), fig_arc_ratio_path=Path(),
-        fig_class_stack_path=Path(), fig_indicator_path=Path(),
-        model_version=model_version,
-        batch_size=batch_size,
-        high_prob=high_prob, high_std=high_std,
-        bin_size_myr=BIN_SIZE_MYR,
-        skip_model=False,
-        reuse_existing_probabilities=False,
-        trust_current_class_order_for_existing_probs=False,
-        use_coverage_recommended_threshold=False,
+    raw_data = read_csv_fallback(case_config.source_path)
+    case_config.raw_output_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_data.to_csv(
+        case_config.raw_output_path,
+        index=False,
+        encoding="utf-8-sig",
     )
 
-    probs_mean, probs_std = predict_probabilities(feat_36, class_names, tmp_cfg)
+    # 中文注释：复用太古代主预处理流程，严格执行缺失数<18、五项主量有效、
+    # 主量无水标准化及SiO2=44-53 wt%、MgO<=18 wt%的筛选。
+    preprocessed = preprocess_archean(raw_data)
+    case_config.preprocessed_path.parent.mkdir(parents=True, exist_ok=True)
+    preprocessed.to_csv(
+        case_config.preprocessed_path,
+        index=False,
+        encoding="utf-8-sig",
+    )
+    print(
+        f"  原始样品 {len(raw_data)}，严格预处理后 {len(preprocessed)}"
+    )
 
-    # 复用全局 add_prediction_columns 注入预测列（已对缺失 Arc_probability3 容错）
+    metadata, normalized = _prepare_archean_features(
+        case_config.preprocessed_path,
+    )
+    if metadata.empty:
+        print(f"  [警告] [{case_config.case_label}] 没有有效样品，跳过。")
+        return None
+    missing_mask = _build_archean_missing_mask(metadata)
+    probabilities = _predict_with_missing_mask(
+        normalized,
+        missing_mask,
+        class_names,
+        FINAL_MODEL_WEIGHT_PATH,
+    )
     pred = add_prediction_columns(
-        s3=s3, probs_mean=probs_mean, probs_std=probs_std,
-        class_names=class_names,
-        high_prob=high_prob, high_std=high_std,
+        metadata,
+        probabilities,
+        np.zeros_like(probabilities),
+        class_names,
+        high_prob=HIGH_PROB,
+        high_std=HIGH_STD,
     )
+
     pred["case_label"] = case_config.case_label
     pred["approx_age_ga"] = case_config.approx_age_ga
 
+    case_config.predictions_path.parent.mkdir(parents=True, exist_ok=True)
     pred.to_csv(case_config.predictions_path, index=False, encoding="utf-8-sig")
     return pred
 
@@ -2460,13 +2366,7 @@ def plot_case_studies_bars(
     fig, axes = plt.subplots(3, 2, figsize=(11.0, 11.5))
 
     # 仅本图子图标题使用的克拉通展示名（未列出的沿用 CASE_STUDIES_ORDER 中的 case_title）。
-    PANEL_TITLE_OVERRIDES = {
-        "Belingwe_Zimbabwe": "Belingwe",
-        "Superior_Abitibi":  "Abitibi",
-    }
-
     for ax_idx, (case_label, case_title, _) in enumerate(CASE_STUDIES_ORDER):
-        case_title = PANEL_TITLE_OVERRIDES.get(case_label, case_title)
         ax = axes.flat[ax_idx]
         if case_label not in case_results:
             ax.text(0.5, 0.5, f"{case_title}\n(no data)",
@@ -2700,29 +2600,23 @@ def plot_case_studies_stacked_bar(
 
 def run_case_studies(
     class_names: list[str],
-    weights: list[Path],
-    model_version: str,
-    batch_size: int,
-    high_prob: float,
-    high_std: float,
 ) -> dict[str, pd.DataFrame]:
     """
-    执行 6 案例预测 + 输出 3 张组合图 + 1 张汇总 CSV。
+    独立读取六个现成案例数据表，输出三张组合图和一张汇总表。
     返回每个案例的预测 DataFrame 字典。
     """
     print("\n" + "#" * 80)
     print(f"# 案例研究预测（共 {len(CASE_STUDIES_ORDER)} 个克拉通案例）")
     print("#" * 80)
 
-    CASE_STUDY_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    CASE_RAW_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CASE_PREPROCESSED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CASE_PREDICTIONS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     case_results: dict[str, pd.DataFrame] = {}
 
     for case_config in build_case_study_configs():
         print(f"\n[案例] {case_config.case_title} (~{case_config.approx_age_ga} Ga)")
-        pred = predict_one_case(
-            case_config, class_names, weights,
-            model_version, batch_size, high_prob, high_std,
-        )
+        pred = predict_one_case(case_config, class_names)
         if pred is None:
             continue
         n = len(pred)
@@ -2795,7 +2689,12 @@ def write_report(
     n          = len(df)
     high_n     = int(df["is_high_confidence"].sum())
     arc_high_n = int((df["is_high_confidence"] & df["is_arc_related_9class"]).sum())
-    liu_arc_n  = int(df["liu_arc_binary"].sum())
+    
+    # Liu 2024 基线统计（只统计有 Liu 预测值的样品）
+    liu_valid = df[df["liu_arc_binary"].notna()]
+    n_liu_valid = len(liu_valid)
+    liu_arc_n = int(liu_valid["liu_arc_binary"].sum()) if n_liu_valid > 0 else 0
+    
     mean_missing = float(df["missing_feature_count_36"].mean()) if "missing_feature_count_36" in df else np.nan
     max_missing = int(df["missing_feature_count_36"].max()) if "missing_feature_count_36" in df else 0
 
@@ -2805,7 +2704,7 @@ def write_report(
 
     age_summary_table = dataframe_to_markdown_table(age_summary[[
         "age_bin", "n_all", "n_high",
-        "ratio_9class_arc_all", "ratio_9class_arc_high", "ratio_liu_arc",
+        "ratio_9class_arc_all", "ratio_9class_arc_high", "n_liu_samples", "ratio_liu_arc",
     ]])
 
     thresh_note = (
@@ -2823,16 +2722,16 @@ def write_report(
         "# Archean basalt ViT-Transformer Dual-Stream prediction report",
         "",
         f"- Preprocess variant: `{config.preprocess_variant}`",
-        f"- Source CSV: `{config.source_s3_csv_path}`",
+        f"- Source CSV (Liu et al. 2024 original): `{config.source_s3_csv_path}`",
         f"- Preprocessed sample table: `{config.preprocessed_s3_path}`",
         f"- Preprocessed feature table: `{config.preprocessed_features_path}`",
         f"- Model weights: `{'; '.join(str(p) for p in config.weights)}`",
         f"- Samples entering model: {n}",
-        f"- Missing features before imputation: mean {mean_missing:.2f}, max {max_missing}",
+        f"- Missing features in source data: mean {mean_missing:.2f}, max {max_missing}",
         f"- High-confidence threshold used: `{config.high_prob:.3f}` ({threshold_mode})",
         f"- High-confidence samples: {high_n} ({high_n / n:.1%})",
         f"- High-confidence arc-related samples: {arc_high_n} ({arc_high_n / n:.1%} of all samples)",
-        f"- Liu 2024 binary arc samples (`Arc_probability3 >= 0.5`): {liu_arc_n} ({liu_arc_n / n:.1%})",
+        f"- Liu 2024 baseline: {n_liu_valid} samples with original predictions, {liu_arc_n} arc-related (`Arc_probability3 >= 0.5`, {liu_arc_n / n_liu_valid:.1%})",
         thresh_note,
         "",
         "Arc-related classes: Continental arc, Intra-oceanic arc, Island arc.",
@@ -2853,292 +2752,260 @@ def write_report(
 # 主流水线
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run(config: RunConfig) -> None:
-    """
-    5 步主流水线：
-      [1/5] 读取预处理后的太古代样品表和 1~255 特征表
-      [2/5] Coverage-Accuracy 曲线（若提供测试集）→ 确定阈值
-      [3/5] 模型推理（多权重集成，输出概率均值和标准差）
-      [4/5] 构建预测表、年龄/克拉通/传统指标汇总
-      [5/5] 绘图并输出 Markdown 报告
-    """
-    config.output_dir.mkdir(parents=True, exist_ok=True)
+QUANTILE_PARAMS_PATH = Path(str(QUANTILE_PARAMS_JSON))
 
-    # ── Step 1 ────────────────────────────────────────────────────────────────
-    print("[1/5] 读取预处理后的太古代模型输入")
-    s3_model, normalized = load_preprocessed_archean_data(config)
-    print(f"      进入模型样品数: {len(s3_model)}")
-    print(f"      quantile 后 0 值数量: {int((normalized[COLUMNS_TO_EXTRACT] == 0).sum().sum())}")
+ARCHEAN_COLUMN_MAPPING = {
+    "SIO2": "SIO2(WT%)", "TIO2": "TIO2(WT%)",
+    "AL2O3": "AL2O3(WT%)", "FEOT": "FEOT(WT%)",
+    "MNO": "MNO(WT%)", "MGO": "MGO(WT%)", "CAO": "CAO(WT%)",
+    "NA2O": "NA2O(WT%)", "K2O": "K2O(WT%)", "P2O5": "P2O5(WT%)",
+    "V": "V(PPM)", "CR": "CR(PPM)", "CO": "CO(PPM)", "NI": "NI(PPM)",
+    "RB": "RB(PPM)", "SR": "SR(PPM)", "Y": "Y(PPM)", "ZR": "ZR(PPM)",
+    "NB": "NB(PPM)", "BA": "BA(PPM)", "LA": "LA(PPM)", "CE": "CE(PPM)",
+    "PR": "PR(PPM)", "ND": "ND(PPM)", "SM": "SM(PPM)", "EU": "EU(PPM)",
+    "GD": "GD(PPM)", "TB": "TB(PPM)", "DY": "DY(PPM)", "HO": "HO(PPM)",
+    "ER": "ER(PPM)", "YB": "YB(PPM)", "LU": "LU(PPM)", "HF": "HF(PPM)",
+    "TA": "TA(PPM)", "TH": "TH(PPM)",
+}
+ARCHEAN_MAJOR_COLUMNS = [
+    "NA2O(WT%)", "MGO(WT%)", "AL2O3(WT%)", "SIO2(WT%)",
+    "P2O5(WT%)", "K2O(WT%)", "CAO(WT%)", "TIO2(WT%)",
+    "MNO(WT%)", "FEOT(WT%)",
+]
 
-    if len(s3_model) == 0:
-        print("      没有样品可用于模型预测。")
-        return
 
-    if config.skip_model:
-        print("      skip_model=True，仅检查预处理输入，跳过推理。")
-        return
+def _extract_archean_feature_table(metadata: pd.DataFrame) -> pd.DataFrame:
+    """兼容扩展总表的短列名和案例原始表的标准长列名。"""
+    features = pd.DataFrame(index=metadata.index)
+    for short_name, long_name in ARCHEAN_COLUMN_MAPPING.items():
+        if short_name in metadata.columns:
+            source_column = short_name
+        elif long_name in metadata.columns:
+            source_column = long_name
+        else:
+            features[long_name] = np.nan
+            continue
+        features[long_name] = pd.to_numeric(
+            metadata[source_column],
+            errors="coerce",
+        )
+    return features[COLUMNS_TO_EXTRACT].where(
+        features[COLUMNS_TO_EXTRACT] > 0
+    )
 
-    # ── Step 2 ────────────────────────────────────────────────────────────────
-    print("[2/5] 加载类别名称")
-    class_names = load_class_names(config.train_path)
 
-    recommended_thresh: Optional[float] = None
-    if config.test_path is not None and config.test_path.exists():
-        print("[2/5] 绘制 Coverage-Accuracy 曲线")
-        recommended_thresh = plot_coverage_accuracy(config.test_path, class_names, config)
+def _prepare_archean_features(
+    archean_path: Path,
+    max_missing_features: Optional[int] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """将太古代原始数据转换为1-255编码，缺失单元固定保留为0。"""
+    metadata = read_csv_fallback(archean_path)
+    features = _extract_archean_feature_table(metadata)
+
+    missing_count = features.isna().sum(axis=1)
+    if max_missing_features is None:
+        # 中文注释：正文总池只剔除36个特征全部缺失的样品。
+        valid_rows = missing_count < len(COLUMNS_TO_EXTRACT)
     else:
-        print("[2/5] 未提供有效的 TEST_PATH，跳过 Coverage-Accuracy 曲线。")
+        # 中文注释：案例研究最多允许缺失18个特征，即至少保留18个有效特征。
+        valid_rows = missing_count <= max_missing_features
+    dropped_count = int((~valid_rows).sum())
+    metadata = metadata.loc[valid_rows].reset_index(drop=True)
+    features = features.loc[valid_rows].reset_index(drop=True)
+    metadata["missing_feature_count_36"] = (
+        missing_count.loc[valid_rows].to_numpy(dtype=np.int16)
+    )
 
-    # ── Step 3 ────────────────────────────────────────────────────────────────
-    print("[3/5] 执行模型推理")
-    if _TORCH_AVAILABLE:
-        probs_mean, probs_std = predict_probabilities(normalized, class_names, config)
-        if SAVE_PROBABILITIES:
-            np.savez(
-                config.probabilities_path,
-                probs_mean=probs_mean,
-                probs_std=probs_std,
-                class_names=np.array(class_names),
+    # 中文注释：只用样品当前已有的主量元素做无水标准化，缺失值不参与计算。
+    major_total = features[ARCHEAN_MAJOR_COLUMNS].sum(
+        axis=1,
+        min_count=1,
+    )
+    features.loc[:, ARCHEAN_MAJOR_COLUMNS] = features[
+        ARCHEAN_MAJOR_COLUMNS
+    ].div(major_total, axis=0) * 100.0
+
+    with QUANTILE_PARAMS_PATH.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        quantile_params = json.load(file)
+
+    encoded = pd.DataFrame(index=features.index)
+    for column in COLUMNS_TO_EXTRACT:
+        values = features[column].to_numpy(dtype=float)
+        boundaries = np.asarray(quantile_params[column], dtype=float)
+        valid = np.isfinite(values)
+        encoded_values = np.zeros(len(values), dtype=np.int16)
+        encoded_values[valid] = (
+            np.searchsorted(
+                boundaries,
+                values[valid],
+                side="left",
+            ) + 1
+        ).clip(1, 255)
+        encoded[column] = encoded_values
+
+    print(
+        f"      [原始数据] 样品={len(encoded)}，"
+        f"缺失筛选剔除={dropped_count}，"
+        f"缺失编码0单元={int((encoded == 0).sum().sum())}"
+    )
+    return metadata, encoded
+
+
+def _build_archean_missing_mask(metadata: pd.DataFrame) -> pd.DataFrame:
+    """根据原始扩展太古代数据生成与训练阶段一致的36维缺失编码。"""
+    features = _extract_archean_feature_table(metadata)
+    missing_mask = features.isna().astype(np.uint8)
+    missing_mask.columns = [
+        f"missing_mask__{column}" for column in COLUMNS_TO_EXTRACT
+    ]
+    return missing_mask.reset_index(drop=True)
+
+
+def _predict_with_missing_mask(
+    normalized: pd.DataFrame,
+    missing_mask: pd.DataFrame,
+    class_names: list[str],
+    weight_path: Path,
+) -> np.ndarray:
+    """加载缺失编码GeoDAN权重并返回九分类概率。"""
+    if not _TORCH_AVAILABLE:
+        raise RuntimeError("2×2实验需要PyTorch环境")
+
+    from torch.utils.data import DataLoader, TensorDataset
+
+    x_img, x_seq = build_model_inputs(normalized, missing_mask)
+    loader = DataLoader(
+        TensorDataset(
+            torch.FloatTensor(x_img),
+            torch.FloatTensor(x_seq),
+        ),
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = _build_model(
+        len(class_names),
+        use_missing_mask=True,
+    ).to(device)
+    model = _load_weights(weight_path, model, device)
+    model.eval()
+
+    probability_parts = []
+    with torch.no_grad():
+        for batch_index, (batch_img, batch_seq) in enumerate(loader, start=1):
+            logits = model(
+                batch_img.to(device),
+                batch_seq.to(device),
             )
-            print(f"      probabilities.npz 已保存: {config.probabilities_path}")
-        else:
-            print("      [跳过] probabilities.npz 输出 (SAVE_PROBABILITIES=False)")
-    elif config.reuse_existing_probabilities:
-        print("      PyTorch 不可用，复用已有概率文件重新生成预测统计。")
-        probs_mean, probs_std = load_existing_probabilities(config, class_names, len(s3_model))
-    else:
-        raise RuntimeError("模型推理需要 PyTorch。请激活训练时使用的 Python 环境。")
+            probability_parts.append(
+                F.softmax(logits, dim=1).cpu().numpy()
+            )
+            if batch_index % 10 == 0 or batch_index == len(loader):
+                print(
+                    f"        推理批次 {batch_index}/{len(loader)}",
+                    flush=True,
+                )
+    return np.concatenate(probability_parts, axis=0)
 
-    # ── Step 4 ────────────────────────────────────────────────────────────────
-    print("[4/5] 构建预测表和地质汇总统计")
 
-    # 默认使用固定 HIGH_PROB；Coverage-Accuracy 的阈值只作为诊断，避免应用数据阈值被自动抬到极端值。
-    effective_high_prob = config.high_prob
-    if config.use_coverage_recommended_threshold and recommended_thresh is not None:
-        effective_high_prob = recommended_thresh
-    config_for_report = dataclass_replace(config, high_prob=effective_high_prob)
+FINAL_ARCHEAN_RAW_PATH = Path(str(ARCHEAN_POOL_CSV))
+FINAL_ARCHEAN_MASK_PATH = Path(str(ARCHEAN_FINAL_MASK_CSV))
+FINAL_MODEL_WEIGHT_PATH = Path(str(MAIN_MODEL_WEIGHT))
+FINAL_OUTPUT_DIR = Path(str(ARCHEAN_FINAL_DIR))
+FINAL_PREDICTION_PATH = Path(str(ARCHEAN_FINAL_PREDICTIONS_CSV))
+FINAL_COMPOSITE_PATH = FINAL_OUTPUT_DIR / "fig_main_composite_tectonic.png"
+def run_final_prediction() -> None:
+    """运行固定正文方案：CFB=6920、显式缺失编码、太古代原始数据。"""
+    required_paths = [
+        FINAL_ARCHEAN_RAW_PATH,
+        QUANTILE_PARAMS_PATH,
+        FINAL_MODEL_WEIGHT_PATH,
+        SOURCE_S3_CSV_PATH,
+        TRAIN_PATH,
+    ]
+    missing_paths = [path for path in required_paths if not path.exists()]
+    if missing_paths:
+        raise FileNotFoundError(
+            "最终方案缺少文件:\n" + "\n".join(str(path) for path in missing_paths)
+        )
 
-    pred = add_prediction_columns(
-        s3=s3_model,
-        probs_mean=probs_mean,
-        probs_std=probs_std,
-        class_names=class_names,
-        high_prob=effective_high_prob,
-        high_std=config.high_std,
+    print("=" * 80)
+    print("最终方案：CFB=6920 + 缺失编码 + 太古代原始数据")
+    class_names = load_class_names(TRAIN_PATH)
+    metadata, normalized = _prepare_archean_features(FINAL_ARCHEAN_RAW_PATH)
+    missing_mask = _build_archean_missing_mask(metadata)
+    FINAL_ARCHEAN_MASK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    missing_mask.to_csv(
+        FINAL_ARCHEAN_MASK_PATH,
+        index=False,
+        encoding="utf-8-sig",
     )
-    pred = add_age_bins(pred, config.bin_size_myr)
-    pred.to_csv(config.predictions_path, index=False, encoding="utf-8-sig")
-
-    age_summary       = summarize_by_age(pred, class_names)
-    craton_summary    = summarize_cratons(pred)
-    indicator_summary = summarize_indicators(pred)
-
-    age_summary.to_csv(config.age_summary_path, index=False, encoding="utf-8-sig")
-    craton_summary.to_csv(config.craton_summary_path, index=False, encoding="utf-8-sig")
-    indicator_summary.to_csv(config.indicator_summary_path, index=False, encoding="utf-8-sig")
-
-    # ── Step 5 ────────────────────────────────────────────────────────────────
-    print("[5/5] 输出图表和分析报告")
-    plot_arc_ratio(
-        pred,
-        probs_mean,
-        age_summary,
-        config.fig_arc_ratio_path,
-        high_threshold=MAIN_ARC_RATIO_THRESHOLD,
-        high_std=config.high_std,
-    )
-    # 中文注释：敏感性图路径使用显式完整路径，避免运行时拼接。
-    if config.preprocess_variant == "imputed":
-        sensitivity_path = IMPUTED_FIG_ARC_RATIO_SENSITIVITY_PATH
-    else:
-        sensitivity_path = NO_IMPUTE_FIG_ARC_RATIO_SENSITIVITY_PATH
-    plot_arc_ratio_sensitivity(
-        pred,
-        probs_mean,
-        sensitivity_path,
-        high_std=config.high_std,
-    )
-    print(f"      sensitivity: {sensitivity_path.name}")
-    # 中文注释：全球空间分布图用完整路径常量，避免在运行阶段拼接路径。
-    if config.preprocess_variant == "imputed":
-        map_path = IMPUTED_FIG_ARC_AFFINITY_MAP_PATH
-    else:
-        map_path = NO_IMPUTE_FIG_ARC_AFFINITY_MAP_PATH
-    plot_arc_affinity_global_map(
-        pred,
-        probs_mean,
+    probabilities = _predict_with_missing_mask(
+        normalized,
+        missing_mask,
         class_names,
-        map_path,
-        high_threshold=MAIN_ARC_RATIO_THRESHOLD,
-        high_std=config.high_std,
+        FINAL_MODEL_WEIGHT_PATH,
     )
-    print(f"      arc affinity map: {map_path.name}")
-    plot_class_stack(pred, class_names, config.fig_class_stack_path)
-    plot_indicator_comparison(indicator_summary, config.fig_indicator_path)
+    prediction = add_prediction_columns(
+        metadata,
+        probabilities,
+        np.zeros_like(probabilities),
+        class_names,
+        high_prob=HIGH_PROB,
+        high_std=HIGH_STD,
+    )
+    prediction = add_age_bins(prediction, BIN_SIZE_MYR)
+    age_summary = summarize_by_age(prediction, class_names)
+    indicator_summary = summarize_indicators(prediction)
+    liu_age_summary = summarize_liu_baseline_by_age(
+        SOURCE_S3_CSV_PATH,
+        BIN_SIZE_MYR,
+    )
 
-    # 组合主图：(a) 山脊图 + (b) 弧相关比例 + (c) 传统地化指标三联子图
-    composite_path = config.output_dir / "fig_main_composite_tectonic.png"
+    FINAL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    prediction.to_csv(
+        FINAL_PREDICTION_PATH,
+        index=False,
+        encoding="utf-8-sig",
+    )
     plot_main_composite_figure(
-        pred,
+        prediction,
         class_names,
-        probs_mean,
+        probabilities,
         age_summary,
+        liu_age_summary,
         indicator_summary,
-        composite_path,
-        high_threshold=MAIN_ARC_RATIO_THRESHOLD,
-        high_std=config.high_std,
-    )
-    print(f"      composite main figure: {composite_path.name}")
-
-    # 中文注释：9 类构造环境年龄分布默认输出 KDE 山脊图，路径使用显式完整路径常量。
-    if PLOT_CLASS_KDE_RIDGELINE:
-        if config.preprocess_variant == "imputed":
-            ridgeline_path = IMPUTED_FIG_KDE_RIDGELINE_PATH
-            ridgeline_data_range_path = IMPUTED_FIG_KDE_RIDGELINE_DATA_RANGE_PATH
-            ridgeline_full_zero_path = IMPUTED_FIG_KDE_RIDGELINE_FULL_ZERO_PATH
-        else:
-            ridgeline_path = NO_IMPUTE_FIG_KDE_RIDGELINE_PATH
-            ridgeline_data_range_path = NO_IMPUTE_FIG_KDE_RIDGELINE_DATA_RANGE_PATH
-            ridgeline_full_zero_path = NO_IMPUTE_FIG_KDE_RIDGELINE_FULL_ZERO_PATH
-        plot_class_kde_ridgeline(
-            pred,
-            class_names,
-            ridgeline_full_zero_path,
-            x_axis_mode="full_archean_zero_edge",
-        )
-        print(f"      KDE ridgeline full Archean zero edge: {ridgeline_full_zero_path.name}")
-        plot_class_kde_ridgeline(pred, class_names, ridgeline_path)
-        print(f"      KDE ridgeline: {ridgeline_path.name}")
-        plot_class_kde_ridgeline(
-            pred,
-            class_names,
-            ridgeline_data_range_path,
-            x_axis_mode="data_age_range",
-        )
-        print(f"      KDE ridgeline data age range: {ridgeline_data_range_path.name}")
-    if PLOT_CLASS_BUBBLE_MATRIX:
-        bubble_path = config.output_dir / "fig_9class_bubble_matrix_by_age.png"
-        plot_class_bubble_matrix(pred, class_names, bubble_path)
-        print(f"      bubble matrix: {bubble_path.name}")
-
-    if SAVE_ANALYSIS_REPORT:
-        write_report(pred, age_summary, craton_summary, config_for_report, recommended_thresh)
-        print(f"      analysis_report.md 已保存: {config.analysis_report_path.name}")
-    else:
-        print("      [跳过] analysis_report.md 输出 (SAVE_ANALYSIS_REPORT=False)")
-    print(f"完成。输出目录: {config.output_dir}")
-
-
-def build_imputed_config() -> RunConfig:
-    """构建读取 MissForest 插补输入的预测配置。"""
-    return RunConfig(
-        preprocess_variant="imputed",
-        source_s3_csv_path=SOURCE_S3_CSV_PATH,
-        preprocessed_s3_path=IMPUTED_PREPROCESSED_S3_PATH,
-        preprocessed_features_path=IMPUTED_PREPROCESSED_FEATURES_PATH,
-        train_path=TRAIN_PATH,
-        test_path=TEST_PATH,
-        weights=WEIGHTS,
-        output_dir=IMPUTED_OUTPUT_DIR,
-        probabilities_path=IMPUTED_PROBABILITIES_PATH,
-        predictions_path=IMPUTED_PREDICTIONS_PATH,
-        age_summary_path=IMPUTED_AGE_SUMMARY_PATH,
-        craton_summary_path=IMPUTED_CRATON_SUMMARY_PATH,
-        indicator_summary_path=IMPUTED_INDICATOR_SUMMARY_PATH,
-        analysis_report_path=IMPUTED_ANALYSIS_REPORT_PATH,
-        fig_coverage_accuracy_path=IMPUTED_FIG_COVERAGE_ACCURACY_PATH,
-        fig_arc_ratio_path=IMPUTED_FIG_ARC_RATIO_PATH,
-        fig_class_stack_path=IMPUTED_FIG_CLASS_STACK_PATH,
-        fig_indicator_path=IMPUTED_FIG_INDICATOR_PATH,
-        model_version=MODEL_VERSION,
-        batch_size=BATCH_SIZE,
-        high_prob=HIGH_PROB,
+        FINAL_COMPOSITE_PATH,
+        high_threshold=0.5,
         high_std=HIGH_STD,
-        bin_size_myr=BIN_SIZE_MYR,
-        skip_model=SKIP_MODEL,
-        reuse_existing_probabilities=REUSE_EXISTING_PROBABILITIES,
-        trust_current_class_order_for_existing_probs=TRUST_CURRENT_CLASS_ORDER_FOR_EXISTING_PROBS,
-        use_coverage_recommended_threshold=USE_COVERAGE_RECOMMENDED_THRESHOLD,
     )
+    run_case_studies(class_names)
 
-
-def build_no_impute_config() -> RunConfig:
-    """构建读取不插补输入的预测配置。"""
-    return RunConfig(
-        preprocess_variant="no_impute",
-        source_s3_csv_path=SOURCE_S3_CSV_PATH,
-        preprocessed_s3_path=NO_IMPUTE_PREPROCESSED_S3_PATH,
-        preprocessed_features_path=NO_IMPUTE_PREPROCESSED_FEATURES_PATH,
-        train_path=TRAIN_PATH,
-        test_path=TEST_PATH,
-        weights=WEIGHTS,
-        output_dir=NO_IMPUTE_OUTPUT_DIR,
-        probabilities_path=NO_IMPUTE_PROBABILITIES_PATH,
-        predictions_path=NO_IMPUTE_PREDICTIONS_PATH,
-        age_summary_path=NO_IMPUTE_AGE_SUMMARY_PATH,
-        craton_summary_path=NO_IMPUTE_CRATON_SUMMARY_PATH,
-        indicator_summary_path=NO_IMPUTE_INDICATOR_SUMMARY_PATH,
-        analysis_report_path=NO_IMPUTE_ANALYSIS_REPORT_PATH,
-        fig_coverage_accuracy_path=NO_IMPUTE_FIG_COVERAGE_ACCURACY_PATH,
-        fig_arc_ratio_path=NO_IMPUTE_FIG_ARC_RATIO_PATH,
-        fig_class_stack_path=NO_IMPUTE_FIG_CLASS_STACK_PATH,
-        fig_indicator_path=NO_IMPUTE_FIG_INDICATOR_PATH,
-        model_version=MODEL_VERSION,
-        batch_size=BATCH_SIZE,
-        high_prob=HIGH_PROB,
-        high_std=HIGH_STD,
-        bin_size_myr=BIN_SIZE_MYR,
-        skip_model=SKIP_MODEL,
-        reuse_existing_probabilities=REUSE_EXISTING_PROBABILITIES,
-        trust_current_class_order_for_existing_probs=TRUST_CURRENT_CLASS_ORDER_FOR_EXISTING_PROBS,
-        use_coverage_recommended_threshold=USE_COVERAGE_RECOMMENDED_THRESHOLD,
+    high_arc_count = int(prediction["Arc_probability3"].ge(0.5).sum())
+    cfb_count = int(
+        prediction["pred_class_name"].eq(
+            "CONTINENTAL FLOOD BASALT"
+        ).sum()
     )
-
-
-def build_run_config(preprocess_variant: str) -> RunConfig:
-    """根据预测输入版本开关选择配置。"""
-    if preprocess_variant == "imputed":
-        return build_imputed_config()
-    if preprocess_variant == "no_impute":
-        return build_no_impute_config()
-    raise ValueError("PREDICT_PREPROCESS_VARIANT 只能是 'imputed'、'no_impute' 或 'both'")
-
-
-def selected_run_configs(preprocess_variant: str) -> list[RunConfig]:
-    """根据预测输入版本开关返回需要运行的预测配置。"""
-    if preprocess_variant == "both":
-        return [build_imputed_config(), build_no_impute_config()]
-    return [build_run_config(preprocess_variant)]
+    print(
+        f"完成：样品={len(prediction)}，高弧={high_arc_count}，"
+        f"CFB={cfb_count}"
+    )
+    print(f"预测结果: {FINAL_PREDICTION_PATH}")
+    print(f"正文主图: {FINAL_COMPOSITE_PATH}")
+    print(f"案例研究: {CASE_STUDY_OUTPUT_ROOT}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 入口：直接由配置区变量构建 RunConfig 并执行
+# 入口：正文流程固定为CFB=6920、缺失编码、太古代原始数据
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     try:
-        # ── 1. Liu 2024 全球数据集预测 ────────────────────────────────────────
-        for config in selected_run_configs(PREDICT_PREPROCESS_VARIANT):
-            print("=" * 80)
-            print(f"[预测输入版本] {config.preprocess_variant}")
-            run(config)
-
-        # ── 2. 6 个克拉通案例研究预测 ─────────────────────────────────────────
-        if RUN_CASE_STUDIES:
-            if not _TORCH_AVAILABLE:
-                print("⚠ PyTorch 不可用，无法对案例研究执行新预测；跳过案例研究。")
-            else:
-                # 案例预测复用第一个配置的训练集与权重（class 顺序、模型版本一致）
-                first_cfg = selected_run_configs(PREDICT_PREPROCESS_VARIANT)[0]
-                class_names = load_class_names(first_cfg.train_path)
-                run_case_studies(
-                    class_names=class_names,
-                    weights=first_cfg.weights,
-                    model_version=first_cfg.model_version,
-                    batch_size=first_cfg.batch_size,
-                    high_prob=first_cfg.high_prob,
-                    high_std=first_cfg.high_std,
-                )
+        run_final_prediction()
     except Exception as exc:
         print(f"[ERROR] {exc}")
         raise

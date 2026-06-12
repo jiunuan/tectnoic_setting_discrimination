@@ -6,12 +6,15 @@ from pathlib import Path
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from config.paths import REFINED_EXPANDED_CSV, CM_RECLASS_DIR
+from iron_normalization import calculate_feot
+from major_element_normalization import normalize_major_oxides_for_filtering
+from config.paths import REFINED_EXPANDED_CSV, GEOROC_REFERENCES_CSV
 
-# 默认使用回贴 expanded(高+中置信度)汇聚边缘标签后的总表，以保证岛弧样本量。
+# 默认使用并回 expanded(高+中置信度)汇聚边缘标签后的总表，以保证岛弧样本量。
 DEFAULT_FILE_PATH = str(REFINED_EXPANDED_CSV)
-DEFAULT_REFERENCES_PATH = str(CM_RECLASS_DIR / "references_structured.csv")
+DEFAULT_REFERENCES_PATH = str(GEOROC_REFERENCES_CSV)
 DEFAULT_COLUMNS_TO_EXTRACT = [
     "NA2O(WT%)",
     "MGO(WT%)",
@@ -79,13 +82,15 @@ TECTONIC_REPLACEMENTS = {
     "RIFT VOLCANICS": "CONTINENTAL_RIFT",
     "Back-arc basin": "BACK-ARC_BASIN",
 }
+# 中文注释：主要氧化物，要求非空（不能缺失）。
+REQUIRED_MAJOR_OXIDES = ["SIO2(WT%)", "AL2O3(WT%)", "FEOT(WT%)", "MGO(WT%)", "CAO(WT%)"]
 
 
 @dataclass
 class FilterParams:
     columns_to_extract: list[str] = field(default_factory=lambda: DEFAULT_COLUMNS_TO_EXTRACT.copy())
     allowed_settings: list[str] = field(default_factory=lambda: DEFAULT_ALLOWED_SETTINGS.copy())
-    sio2_min: float = 44.0
+    sio2_min: float = 45.0
     sio2_max: float = 53.0
     use_sio2_filter: bool = True
     mgo_min: float = 4.5
@@ -96,9 +101,10 @@ class FilterParams:
     loi_max: float = 5.0
     keep_loi_nan: bool = True
     use_loi_filter: bool = True
-    min_non_nan: int = 16
+    min_non_nan: int = 20
     use_min_non_nan_filter: bool = True
     exclude_archean_age: bool = True
+    require_major_oxides: bool = True
     drop_duplicates: bool = True
     final_count_per_setting: int = 20000
     apply_setting_filter: bool = True
@@ -248,6 +254,8 @@ def analyze_filters(
 ):
     params = params or FilterParams()
     raw_df = read_csv_with_fallback(file_path)
+    # 中文注释：所有筛选开始前先按统一规则补全总铁 FeOT。
+    raw_df, _ = calculate_feot(raw_df, allow_elemental_fe=False)
     extracted_df = prepare_extracted_dataframe(raw_df, params.columns_to_extract)
     extracted_df = parse_age_columns(extracted_df)
 
@@ -263,19 +271,39 @@ def analyze_filters(
         working_df = working_df[~archean_mask].copy()
         append_step(stats, "after_exclude_archean", working_df)
 
+    if params.require_major_oxides:
+        # 中文注释：主要氧化物 SiO2/Al2O3/FeOT/MgO/CaO 不能缺失。
+        working_df = working_df[working_df[REQUIRED_MAJOR_OXIDES].notna().all(axis=1)].copy()
+        append_step(stats, "after_require_major_oxides", working_df)
+
+    normalized_major = None
+    if params.use_sio2_filter or params.use_mgo_al2o3_filter:
+        # 成分范围必须使用完整主量氧化物换算后的无水 100% 基准值。
+        normalized_major, normalization_ok = normalize_major_oxides_for_filtering(working_df)
+        working_df = working_df.loc[normalization_ok].copy()
+        normalized_major = normalized_major.loc[working_df.index]
+        append_step(stats, "after_anhydrous_normalization_ready", working_df)
+
     if params.use_sio2_filter:
-        sio2_mask = (working_df["SIO2(WT%)"] > params.sio2_min) & (
-            working_df["SIO2(WT%)"] < params.sio2_max
+        sio2_mask = normalized_major["SIO2(WT%)"].between(
+            params.sio2_min,
+            params.sio2_max,
+            inclusive="both",
         )
         working_df = working_df[sio2_mask].copy()
+        normalized_major = normalized_major.loc[working_df.index]
         append_step(stats, "after_sio2", working_df)
 
     if params.use_mgo_al2o3_filter:
-        mgo_mask = (working_df["MGO(WT%)"] >= params.mgo_min) & (
-            working_df["MGO(WT%)"] <= params.mgo_max
+        mgo_mask = normalized_major["MGO(WT%)"].between(
+            params.mgo_min,
+            params.mgo_max,
+            inclusive="both",
         )
-        al2o3_mask = (working_df["AL2O3(WT%)"] >= params.al2o3_min) & (
-            working_df["AL2O3(WT%)"] <= params.al2o3_max
+        al2o3_mask = normalized_major["AL2O3(WT%)"].between(
+            params.al2o3_min,
+            params.al2o3_max,
+            inclusive="both",
         )
         working_df = working_df[mgo_mask & al2o3_mask].copy()
         append_step(stats, "after_mgo_al2o3", working_df)
@@ -289,7 +317,8 @@ def analyze_filters(
         append_step(stats, "after_loi", working_df)
 
     if params.use_min_non_nan_filter:
-        count_non_nans = working_df.notna().sum(axis=1)
+        # 中文注释：仅统计36个目标化学元素，避免元数据被计入完整度。
+        count_non_nans = working_df[params.columns_to_extract].notna().sum(axis=1)
         working_df = working_df.loc[count_non_nans >= params.min_non_nan].copy()
         append_step(stats, "after_min_non_nan", working_df)
 
@@ -314,4 +343,3 @@ def analyze_filters(
         append_step(stats, "final_output", working_df)
 
     return working_df, stats
-

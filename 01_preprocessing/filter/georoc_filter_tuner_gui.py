@@ -26,7 +26,7 @@ class FilterTunerApp:
         self.references_path_var = tk.StringVar(value=DEFAULT_REFERENCES_PATH)
 
         self.use_sio2_var = tk.BooleanVar(value=True)
-        self.sio2_min_var = tk.StringVar(value="44")
+        self.sio2_min_var = tk.StringVar(value="45")
         self.sio2_max_var = tk.StringVar(value="53")
 
         self.use_mgo_al2o3_var = tk.BooleanVar(value=True)
@@ -40,7 +40,8 @@ class FilterTunerApp:
         self.keep_loi_nan_var = tk.BooleanVar(value=True)
 
         self.use_non_nan_var = tk.BooleanVar(value=True)
-        self.min_non_nan_var = tk.StringVar(value="20")
+        self.min_non_nan_var = tk.StringVar(value="18")
+        self.require_major_oxides_var = tk.BooleanVar(value=True)
 
         self.exclude_archean_var = tk.BooleanVar(value=True)
 
@@ -102,13 +103,13 @@ class FilterTunerApp:
         self._add_path_row(file_frame, "Data CSV", self.file_path_var, self._browse_data_file)
         self._add_path_row(file_frame, "References", self.references_path_var, self._browse_references_file)
 
-        sio2_frame = ttk.LabelFrame(parent, text="SiO2 Filter")
+        sio2_frame = ttk.LabelFrame(parent, text="SiO2 Filter (anhydrous 100%)")
         sio2_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Checkbutton(sio2_frame, text="Enable", variable=self.use_sio2_var).grid(row=0, column=0, sticky="w")
         self._add_labeled_entry(sio2_frame, "Min", self.sio2_min_var, 1, 0)
         self._add_labeled_entry(sio2_frame, "Max", self.sio2_max_var, 1, 2)
 
-        mgo_frame = ttk.LabelFrame(parent, text="MgO / Al2O3 Filter")
+        mgo_frame = ttk.LabelFrame(parent, text="MgO / Al2O3 Filter (anhydrous 100%)")
         mgo_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Checkbutton(mgo_frame, text="Enable", variable=self.use_mgo_al2o3_var).grid(
             row=0, column=0, sticky="w"
@@ -132,6 +133,11 @@ class FilterTunerApp:
             row=0, column=0, sticky="w"
         )
         self._add_labeled_entry(nan_frame, "Min non-NaN", self.min_non_nan_var, 1, 0)
+        ttk.Checkbutton(
+            nan_frame,
+            text="Require SiO2/Al2O3/FeOT/MgO/CaO (no missing)",
+            variable=self.require_major_oxides_var,
+        ).grid(row=2, column=0, columnspan=4, sticky="w")
 
         age_frame = ttk.LabelFrame(parent, text="Age Filter")
         age_frame.pack(fill=tk.X, pady=(0, 10))
@@ -258,6 +264,7 @@ class FilterTunerApp:
         params.use_min_non_nan_filter = self.use_non_nan_var.get()
         params.min_non_nan = int(self.min_non_nan_var.get())
         params.exclude_archean_age = self.exclude_archean_var.get()
+        params.require_major_oxides = self.require_major_oxides_var.get()
 
         params.drop_duplicates = self.drop_duplicates_var.get()
         params.apply_setting_filter = self.apply_setting_filter_var.get()
@@ -344,7 +351,7 @@ class FilterTunerApp:
         self.file_path_var.set(DEFAULT_FILE_PATH)
         self.references_path_var.set(DEFAULT_REFERENCES_PATH)
         self.use_sio2_var.set(True)
-        self.sio2_min_var.set("44")
+        self.sio2_min_var.set("45")
         self.sio2_max_var.set("53")
         self.use_mgo_al2o3_var.set(True)
         self.mgo_min_var.set("4.5")
@@ -356,6 +363,7 @@ class FilterTunerApp:
         self.keep_loi_nan_var.set(True)
         self.use_non_nan_var.set(True)
         self.min_non_nan_var.set("20")
+        self.require_major_oxides_var.set(True)
         self.exclude_archean_var.set(True)
         self.drop_duplicates_var.set(True)
         self.apply_setting_filter_var.set(True)

@@ -16,11 +16,14 @@
 
 ## 1. 方法概述
 
-主模型 **Full Model = ViT + Sequence Transformer 双流**：
+主模型 **Full Model = ViT + Sequence Transformer 双流（GeoDAN，显式缺失编码）**：
 
-- **矩阵分支（ViT）**：36 元素排成 **6×6 地化亲缘矩阵** → Patch Embedding → ViT Encoder；
-- **序列分支（Transformer）**：36 元素**按不相容性排序**成序列 → Linear Embedding → Transformer Encoder；
-- **融合**：两分支均值池化 → 拼接 → MLP 分类头 → 9 类构造环境。
+- **矩阵分支（ViT）**：36 元素排成 **6×6 矩阵**，输入两个通道
+  （分位数数值 + 原始缺失 mask）→ Patch Embedding → ViT Encoder；
+- **序列分支（Transformer）**：36 元素按固定地球化学顺序成序列，每个元素携带
+  两个特征（数值 + 缺失 mask）→ Linear Embedding → Transformer Encoder；
+- **融合**：两分支均值池化 → 拼接 → MLP 分类头 → 9 类构造环境；
+- **损失**：普通交叉熵（不加类别权重），类别不平衡由训练集选择性 SMOTE 处理。
 
 `04_model/ablation_v4_vit_transformer.py` 一次性输出主模型与全部消融 / 对比 / 机器学习基线
 （ViT-only、Transformer-only、无位置编码、CNN-BiLSTM、CNN-ViT-Transformer、CNN-only、
@@ -36,14 +39,14 @@ RF / SVM / XGBoost / MLP），多随机种子统计 mean ± std。
 
 ```mermaid
 flowchart LR
-    A["原始数据<br/>GEOROC · PetDB"] --> B["筛选+合并"]
+    A["原始数据<br/>GEOROC · PetDB 2.0"] --> B["规则筛选+合并<br/>(FeOT 统一 · 剔除太古代)"]
     CM["汇聚边缘细分<br/>(外部产出)"] --> B
-    B --> C["切分→按类型拆分→IQR"]
-    C --> D["按类别 MissForest 插补"]
-    D --> E["主量无水标准化<br/>+ 分位数分箱归一化"]
-    E --> F["训练 + 消融<br/>ViT–Transformer 双流"]
+    B --> C["训练/测试切分"]
+    C --> D["全局 RF 插补<br/>+ 缺失 mask"]
+    D --> E["主量无水标准化<br/>→ 选择性 SMOTE (仅训练集)<br/>→ 分位数分箱归一化"]
+    E --> F["训练 + 消融<br/>ViT–Transformer 双流<br/>(显式缺失编码)"]
     F --> G["SHAP 可解释性"]
-    F --> H["太古代应用 (no_impute)"]
+    F --> H["太古代扩展应用集 (3,483)<br/>缺失编码预测 (不插补)"]
 ```
 
 > 完整步骤、每步输入/输出与脚本对照见 **[docs/workflow.md](docs/workflow.md)**。
@@ -56,14 +59,16 @@ flowchart LR
 basalt_tectonic_discrimination/
 ├── config/paths.py            # ★ 集中路径配置（所有脚本由此获取数据/模型路径）
 ├── data/                      # 数据（大文件经 Zenodo 提供，见 data/README.md）
-├── 01_preprocessing/          # 筛选 / 合并 / 切分 / 按类型拆分 / IQR 去离群
-│   ├── filter/                #   GEOROC、PetDB 交互式筛选 GUI + 分析器
-│   ├── combine_list.py · split_train_test.py · split_type.py · outlier_detection_basalt.py
-├── 02_imputation/             # 按构造环境类别 MissForest 插补 + 训练集合并
-├── 03_normalization/          # 主量无水标准化 + 分位数分箱归一化
-├── 04_model/                  # ViT–Transformer 双流训练 + 全部消融/对比/基线
+├── 01_preprocessing/          # 筛选 / 合并 / 切分
+│   ├── filter/                #   extract_georoc.py · extract_petdb.py（正式规则筛选）
+│   │                          #   + iron_normalization.py（FeOT 统一）
+│   │                          #   + 交互式筛选 GUI / 分析器（可选调参工具）
+│   ├── combine_list.py · split_train_test.py
+├── 02_imputation/             # 全局随机森林插补（train fit / test transform）+ 缺失 mask
+├── 03_normalization/          # 主量无水标准化 + 选择性 SMOTE（仅训练集）+ 分位数分箱归一化
+├── 04_model/                  # ViT–Transformer 双流训练（显式缺失编码）+ 消融/对比/基线 + 5 折 CV
 ├── 05_interpretation/         # SHAP 可解释性（Figure 7）
-├── 06_archean_application/    # 太古代外推预测与分布一致性分析（no_impute）
+├── 06_archean_application/    # 太古代扩展应用集构建 + 缺失编码预测 + 适用域/一致性分析
 ├── 07_figures/                # 论文图件（现代玄武岩数据分布箱线图）
 ├── tools/geochem_workflow_designer/  # 可视化工作流编排器（Python + Vue）
 ├── docs/workflow.md           # 端到端流程文档
@@ -100,23 +105,21 @@ pip install -r requirements.txt
 各阶段脚本均**无命令行参数**，配置集中在脚本顶部与 `config/paths.py`，直接运行即可：
 
 ```bash
-# ① 预处理（筛选为交互式 GUI）
-python 01_preprocessing/filter/georoc_filter_tuner_gui.py
-python 01_preprocessing/filter/petdb_filter_tuner_gui.py
+# ① 预处理（正式筛选为非交互规则脚本；filter/ 下的 GUI 为可选调参工具）
+python 01_preprocessing/filter/extract_georoc.py
+python 01_preprocessing/filter/extract_petdb.py
 python 01_preprocessing/combine_list.py
 python 01_preprocessing/split_train_test.py
-python 01_preprocessing/split_type.py
-python 01_preprocessing/outlier_detection_basalt.py
 
-# ② 插补（训练集 fit / 测试集 transform）→ 合并训练集
+# ② 全局插补 + 缺失 mask（训练集 fit / 测试集 transform；太古代只产 mask 不插补）
 python 02_imputation/imputation_train_predict.py
-python 02_imputation/merge_imputed_trainset.py
 
-# ③ 标准化 / 归一化（均一次性处理 训练集 fit + 测试集 transform）
+# ③ 标准化 / SMOTE / 归一化（分位数边界从 SMOTE 前训练集拟合）
 python 03_normalization/normalize_major_elements.py
+python 03_normalization/selective_smote.py
 python 03_normalization/normalize.py
 
-# ④ 训练（需 GPU）
+# ④ 训练（需 GPU；显式缺失编码：数值 + 缺失 mask 双通道）
 python 04_model/ablation_v4_vit_transformer.py
 
 # ④-1 可选：在现有 80% 训练集内部执行 5 折交叉验证（需 GPU）
@@ -125,9 +128,10 @@ python 04_model/kfold_vit_transformer.py
 # ⑤ SHAP 可解释性
 python 05_interpretation/plot_shap_figure7_summary.py
 
-# ⑥ 太古代应用（no_impute）
-python 06_archean_application/archean_s3_preprocess.py
-python 06_archean_application/archean_vit_transformer_dualstream_predict_analysis.py
+# ⑥ 太古代应用（缺失编码，不插补）
+python 06_archean_application/extended_archean_pool_analysis.py            # 构建扩展应用集
+python 06_archean_application/standardize_craton_with_ai.py                # 克拉通名称规范（需 LLM API）
+python 06_archean_application/archean_vit_transformer_dualstream_predict_analysis.py  # 正式预测
 
 # ⑦ 论文数据分布图
 python 07_figures/selected_element_boxplots.py
@@ -138,17 +142,19 @@ python 07_figures/selected_element_boxplots.py
 `04_model/kfold_vit_transformer.py` 不会读取固定保留的 20% 测试集。它只读取
 `data/04_split/01_basalt_number_year_train.csv`，在这部分数据内部生成 5 个训练折和验证折。
 
-每一折都会重新执行：按类别 IQR 清洗、按类别 MissForest 拟合与插补、主量无水归一化、
-训练折分位数拟合、验证折转换和模型训练。默认只训练主模型，每折使用随机种子
-`42`、`123`，即共训练 `5 × 2 = 10` 次。
+每一折都与主流程方法学一致地重新执行：全局随机森林插补（折内训练 fit / 验证 transform）
+并记录原始缺失 mask、主量无水归一化、仅折内训练数据的选择性 SMOTE（目标数量按折比例缩放）、
+SMOTE 前训练折分位数拟合、验证折转换和带缺失编码的模型训练。每折使用随机种子
+`42`、`123`。
 
 逐次结果和汇总结果分别输出到：
 
 - `data/models/kfold/kfold_per_run_results.csv`
 - `data/models/kfold/kfold_summary.csv`
 
-**防数据泄露**：训练/测试集在步骤 ③（`split_train_test.py`）即切分；此后 MissForest 插补、
-分位数边界等 **fit 仅用训练集**，测试集与太古代集只 transform。
+**防数据泄露**：训练/测试集在步骤 ①（`split_train_test.py`）即切分；此后全局插补器、
+SMOTE、分位数边界等 **fit 仅用训练集**（分位数从 SMOTE 前训练集拟合），
+测试集与太古代集只 transform；太古代集不插补，缺失值以"数值 0 + mask 1"显式编码。
 
 ---
 

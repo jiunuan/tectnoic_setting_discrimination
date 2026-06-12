@@ -17,9 +17,10 @@ class PetdbFilterTunerApp:
 
         self.file_path_var = tk.StringVar(value=DEFAULT_FILE_PATH)
         self.use_non_nan_var = tk.BooleanVar(value=True)
-        self.min_non_nan_var = tk.StringVar(value="20")
+        self.min_non_nan_var = tk.StringVar(value="18")
+        self.require_major_oxides_var = tk.BooleanVar(value=True)
 
-        self.use_sio2_var = tk.BooleanVar(value=False)
+        self.use_sio2_var = tk.BooleanVar(value=True)
         self.sio2_min_var = tk.StringVar(value="45")
         self.sio2_max_var = tk.StringVar(value="53")
 
@@ -28,6 +29,7 @@ class PetdbFilterTunerApp:
         self.mgo_max_var = tk.StringVar(value="12")
         self.al2o3_min_var = tk.StringVar(value="12")
         self.al2o3_max_var = tk.StringVar(value="19")
+        self.exclude_archean_var = tk.BooleanVar(value=True)
 
         self.normalize_settings_var = tk.BooleanVar(value=True)
         self.extract_year_var = tk.BooleanVar(value=True)
@@ -64,14 +66,19 @@ class PetdbFilterTunerApp:
             row=0, column=0, sticky="w"
         )
         self._add_labeled_entry(non_nan_frame, "Min non-NaN", self.min_non_nan_var, 1, 0)
+        ttk.Checkbutton(
+            non_nan_frame,
+            text="Require SiO2/Al2O3/FeOT/MgO/CaO (no missing)",
+            variable=self.require_major_oxides_var,
+        ).grid(row=2, column=0, columnspan=4, sticky="w")
 
-        sio2_frame = ttk.LabelFrame(parent, text="SiO2 Filter")
+        sio2_frame = ttk.LabelFrame(parent, text="SiO2 Filter (anhydrous 100%)")
         sio2_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Checkbutton(sio2_frame, text="Enable", variable=self.use_sio2_var).grid(row=0, column=0, sticky="w")
         self._add_labeled_entry(sio2_frame, "Min", self.sio2_min_var, 1, 0)
         self._add_labeled_entry(sio2_frame, "Max", self.sio2_max_var, 1, 2)
 
-        mgo_frame = ttk.LabelFrame(parent, text="MgO / Al2O3 Filter")
+        mgo_frame = ttk.LabelFrame(parent, text="MgO / Al2O3 Filter (anhydrous 100%)")
         mgo_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Checkbutton(mgo_frame, text="Enable", variable=self.use_mgo_al2o3_var).grid(
             row=0, column=0, sticky="w"
@@ -80,6 +87,14 @@ class PetdbFilterTunerApp:
         self._add_labeled_entry(mgo_frame, "MgO Max", self.mgo_max_var, 1, 2)
         self._add_labeled_entry(mgo_frame, "Al2O3 Min", self.al2o3_min_var, 2, 0)
         self._add_labeled_entry(mgo_frame, "Al2O3 Max", self.al2o3_max_var, 2, 2)
+
+        age_frame = ttk.LabelFrame(parent, text="Age Filter")
+        age_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Checkbutton(
+            age_frame,
+            text="Exclude Archean age",
+            variable=self.exclude_archean_var,
+        ).grid(row=0, column=0, sticky="w")
 
         setting_frame = ttk.LabelFrame(parent, text="Tectonic Setting")
         setting_frame.pack(fill=tk.X, pady=(0, 10))
@@ -154,6 +169,7 @@ class PetdbFilterTunerApp:
         params = FilterParams()
         params.use_min_non_nan_filter = self.use_non_nan_var.get()
         params.min_non_nan = int(self.min_non_nan_var.get())
+        params.require_major_oxides = self.require_major_oxides_var.get()
         params.use_sio2_filter = self.use_sio2_var.get()
         params.sio2_min = float(self.sio2_min_var.get())
         params.sio2_max = float(self.sio2_max_var.get())
@@ -162,6 +178,7 @@ class PetdbFilterTunerApp:
         params.mgo_max = float(self.mgo_max_var.get())
         params.al2o3_min = float(self.al2o3_min_var.get())
         params.al2o3_max = float(self.al2o3_max_var.get())
+        params.exclude_archean_age = self.exclude_archean_var.get()
         params.normalize_setting_names = self.normalize_settings_var.get()
         params.extract_publication_year = self.extract_year_var.get()
         params.drop_duplicates = self.drop_duplicates_var.get()
@@ -238,15 +255,17 @@ class PetdbFilterTunerApp:
     def reset_defaults(self):
         self.file_path_var.set(DEFAULT_FILE_PATH)
         self.use_non_nan_var.set(True)
-        self.min_non_nan_var.set("10")
-        self.use_sio2_var.set(False)
+        self.min_non_nan_var.set("20")
+        self.require_major_oxides_var.set(True)
+        self.use_sio2_var.set(True)
         self.sio2_min_var.set("45")
-        self.sio2_max_var.set("52")
+        self.sio2_max_var.set("53")
         self.use_mgo_al2o3_var.set(True)
-        self.mgo_min_var.set("5.5")
-        self.mgo_max_var.set("10")
-        self.al2o3_min_var.set("14")
-        self.al2o3_max_var.set("18")
+        self.mgo_min_var.set("4.5")
+        self.mgo_max_var.set("12")
+        self.al2o3_min_var.set("12")
+        self.al2o3_max_var.set("19")
+        self.exclude_archean_var.set(True)
         self.normalize_settings_var.set(True)
         self.extract_year_var.set(True)
         self.drop_duplicates_var.set(True)

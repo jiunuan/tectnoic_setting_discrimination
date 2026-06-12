@@ -4,9 +4,24 @@
 以及每一步的**脚本 / 输入 / 输出**对照。所有路径常量集中定义在
 [`config/paths.py`](../config/paths.py)，脚本不含硬编码绝对路径。
 
-> 关于数据泄露：训练/测试集在流程**最开始**（步骤 5）即按分层抽样切分，
-> 之后所有 fit 类操作（MissForest 插补、分位数边界）**仅在训练集上拟合**，
-> 测试集与太古代应用集只做 transform。目前未做 KFold，也未做空间区域划分。
+> 关于数据泄露：训练/测试集在流程**最开始**（步骤 ③）即按分层抽样切分，
+> 之后所有 fit 类操作（全局随机森林插补器、SMOTE、分位数边界）**仅在训练集上拟合**，
+> 测试集与太古代应用集只做 transform；分位数边界必须从 **SMOTE 之前**的真实训练集拟合。
+
+## 核心方法约定（GeoDAN 显式缺失编码）
+
+- **插补**：现代数据由训练集拟合**一套全局** `StandardScaler` + 36 个
+  `RandomForestRegressor`（每个元素用其余 35 个元素预测）补齐缺失；
+  `TECTONIC SETTING` 不参与插补拟合。插补**之前**的原始缺失状态保存为
+  二值 mask（1=原始缺失，0=原始实测），训练时作为模型第二通道输入。
+- **太古代不插补**：缺失元素数值固定编码为 `0`，并由 36 维二值 mask
+  显式告诉模型哪里缺失；绝不使用现代随机森林插补器。
+- **类别不平衡**：仅训练集对五个少数类（Island arc / Intra-oceanic arc /
+  BACK-ARC_BASIN / OCEANIC PLATEAU / CONTINENTAL_RIFT）用普通 SMOTE 补到
+  3,000 条；损失为普通交叉熵，**不使用类别权重**。SMOTE 合成行的缺失
+  mask 统一为 0。
+- **双流输入**：ViT 分支把 36 元素组织成两张 `6×6` 图（数值 + 掩码），
+  Transformer 分支让每个元素携带两个特征（数值 + 掩码）。
 
 ---
 
@@ -14,21 +29,21 @@
 
 ```mermaid
 flowchart TD
-    A["原始数据<br/>GEOROC basalt_2025.csv · PetDB merged"] --> B
-    CM["汇聚边缘细分产出<br/>core / expanded CSV<br/>(独立项目 convergent_margin_reclass)"] --> B["重分类后的 GEOROC<br/>basalt_refined_expanded.csv"]
-    B --> C["①筛选<br/>georoc / petdb filter GUI"]
-    C --> D["②合并 GEOROC+PetDB<br/>combine_list.py"]
-    D --> E["③训练/测试切分<br/>split_train_test.py"]
-    E --> F["④按构造环境拆分<br/>split_type.py"]
-    F --> G["⑤IQR 去离群<br/>outlier_detection_basalt.py"]
-    G --> H["⑥按类别 MissForest 插补<br/>imputation_train_predict.py + merge_imputed_trainset.py"]
-    H --> I["⑦主量无水标准化<br/>normalize_major_elements.py"]
-    I --> J["⑧分位数分箱归一化<br/>normalize.py"]
-    J --> K["⑨训练 + 消融<br/>ablation_v4_vit_transformer.py"]
-    K --> L["⑩SHAP 可解释性<br/>plot_shap_figure7_summary.py"]
-    J --> M["⑪太古代应用 (no_impute)<br/>archean_*.py"]
-    K --> M
-    D --> N["⑫数据分布箱线图<br/>selected_element_boxplots.py"]
+    A["原始数据<br/>GEOROC basalt_2025.csv · PetDB 2.0 petdbv2_merged.csv"] --> B
+    CM["汇聚边缘细分产出<br/>basalt_refined_expanded.csv<br/>(独立项目 convergent_margin_reclass)"] --> B["①规则筛选<br/>extract_georoc / extract_petdb<br/>(FeOT 统一 · 剔除太古代 · 无水玄武质范围)"]
+    B --> C["②合并 GEOROC+PetDB<br/>combine_list.py"]
+    C --> D["③训练/测试切分<br/>split_train_test.py"]
+    D --> E["④全局 RF 插补 + 缺失 mask<br/>imputation_train_predict.py"]
+    E --> F["⑤主量无水标准化<br/>normalize_major_elements.py"]
+    F --> G["⑥选择性 SMOTE (仅训练集)<br/>selective_smote.py"]
+    F --> H["⑦分位数分箱归一化<br/>normalize.py (SMOTE 前训练集 fit)"]
+    G --> H
+    H --> I["⑧训练 + 消融 (显式缺失编码)<br/>ablation_v4_vit_transformer.py"]
+    I --> J["⑨SHAP 可解释性<br/>plot_shap_figure7_summary.py"]
+    K["太古代扩展应用集 3,483 条<br/>extended_archean_pool_analysis.py<br/>+ standardize_craton_with_ai.py + 年龄人工核对"] --> L
+    I --> L["⑩太古代缺失编码预测<br/>archean_vit_transformer_dualstream_predict_analysis.py<br/>run_final_prediction()"]
+    H --> L
+    C --> M["⑪数据分布箱线图<br/>selected_element_boxplots.py"]
 ```
 
 ---
@@ -37,59 +52,67 @@ flowchart TD
 
 | # | 阶段 | 脚本 | 输入 | 输出 |
 |---|---|---|---|---|
-| 0 | 汇聚边缘细分（外部） | *（不在本仓库）* `convergent_margin_reclass` | GEOROC 原始 | `01_cm_reclass_input/` 下 core / expanded / `basalt_refined_expanded.csv` |
-| 1 | 筛选 | `01_preprocessing/filter/georoc_filter_tuner_gui.py`、`petdb_filter_tuner_gui.py` | `basalt_refined_expanded.csv` / PetDB 原始 | `02_filtered/basalt_refined_expanded_filtered.csv`、`petDB.csv` |
+| 0 | 汇聚边缘细分（外部） | *（不在本仓库）* `convergent_margin_reclass` | GEOROC 原始 | `01_cm_reclass_input/basalt_refined_expanded.csv` |
+| 1a | GEOROC 规则筛选 | `01_preprocessing/filter/extract_georoc.py` | `basalt_refined_expanded.csv` + `00_raw/georoc/references_structured.csv` | `02_filtered/basalt_refined_expanded_filtered.csv` |
+| 1b | PetDB 规则筛选 | `01_preprocessing/filter/extract_petdb.py` | `00_raw/petdb/petdbv2_merged.csv` | `02_filtered/petDB.csv` |
 | 2 | 合并 | `01_preprocessing/combine_list.py` | 两个筛选结果 | `03_combined/01_basalt_number_year.csv` |
-| 3 | 训练/测试切分 | `01_preprocessing/split_train_test.py` | 合并表 | `04_split/01_basalt_number_year_{train,test}.csv` |
-| 4 | 按构造环境拆分 | `01_preprocessing/split_type.py` | 训练集 | `04_split/preprocess/split/<构造环境>.csv` |
-| 5 | IQR 去离群 | `01_preprocessing/outlier_detection_basalt.py` | 各构造环境训练子集 | `04_split/preprocess/clean/<构造环境>_clean.csv` |
-| 6a | 按类别 MissForest 插补 | `02_imputation/imputation_train_predict.py` | clean 训练子集 + 测试集 | `05_imputed/MissForest/*_clean_imputed.csv`、`02_basalt_test_imputed.csv` |
-| 6b | 合并训练插补结果 | `02_imputation/merge_imputed_trainset.py` | `MissForest/*_clean_imputed.csv` | `05_imputed/02_basalt_train_imputed.csv` |
-| 7 | 主量无水标准化 | `03_normalization/normalize_major_elements.py` | `02_basalt_{train,test}_imputed.csv` | `06_normalized/03_basalt_{train,test}_major_normalize.csv` |
-| 8 | 分位数分箱归一化 | `03_normalization/normalize.py` | `03_basalt_{train,test}_major_normalize.csv` | `06_normalized/05_normalize_basalt_{train,test}.csv` + `quantile_params.json` |
-| 9 | 训练 + 消融 + 基线 | `04_model/ablation_v4_vit_transformer.py` | `05_normalize_basalt_{train,test}.csv` | `models/` 权重 `.pth`、消融结果 CSV、图件 |
-| 10 | SHAP 可解释性 | `05_interpretation/plot_shap_figure7_summary.py`（依赖 `shap_vit_transformer_dualstream.py`） | 归一化训练/测试集 + 模型权重 | `models/shap_analysis/` 图件 |
-| 11 | 太古代应用预处理 | `06_archean_application/archean_s3_preprocess.py`（`PREPROCESS_MODE="no_impute"`） | `archean/data/` + `quantile_params.json` | `archean/outputs/.../preprocess_no_impute/` |
-| 11 | 太古代预测与分析 | `06_archean_application/archean_vit_transformer_dualstream_predict_analysis.py`（`PREDICT_PREPROCESS_VARIANT="no_impute"`） | 预处理输出 + 模型权重 | `archean/outputs/.../prediction_no_impute/` |
-| 11 | 分布一致性 | `06_archean_application/pca_distribution_consistency.py`、`training_application_distribution_consistency.py` | 现代全集 + 太古代集 | 一致性图件 |
-| 12 | 数据分布箱线图 | `07_figures/selected_element_boxplots.py` | `03_combined/01_basalt_number_year.csv` | `figures/selected_elements/` |
+| 3 | 训练/测试切分（分层 0.2，seed=32） | `01_preprocessing/split_train_test.py` | 合并表 | `04_split/01_basalt_number_year_{train,test}.csv` |
+| 4 | 全局 RF 插补 + 缺失 mask | `02_imputation/imputation_train_predict.py` | 训练集（fit）+ 测试集（transform） | `05_imputed/02_basalt_{train,test}_imputed.csv`、`05_imputed/03_{train,test}_missing_mask.csv` |
+| 5 | 主量无水标准化（逐行，无拟合参数） | `03_normalization/normalize_major_elements.py` | `02_basalt_{train,test}_imputed.csv` | `06_normalized/04_basalt_{train,test}_major_normalize.csv` |
+| 6 | 选择性 SMOTE（仅训练集，5 类补到 3000） | `03_normalization/selective_smote.py` | `04_basalt_train_major_normalize.csv` | `06_normalized/05_basalt_train_selected_smote.csv` |
+| 7 | 分位数分箱归一化（SMOTE 前训练集 fit） | `03_normalization/normalize.py` | SMOTE 前/后训练集 + 测试集 | `06_normalized/06_normalize_basalt_train{,_no_smote}.csv`、`06_normalize_basalt_test.csv`、`quantile_params.json` |
+| 8 | 训练 + 消融 + 基线（显式缺失编码） | `04_model/ablation_v4_vit_transformer.py` | `06_normalize_basalt_{train,test}.csv` + 两个 missing mask | `models/` 权重 `.pth`、消融结果 CSV、图件 |
+| 9 | SHAP 可解释性 | `05_interpretation/plot_shap_figure7_summary.py`（依赖 `shap_vit_transformer_dualstream.py`） | 归一化训练/测试集 + missing mask + 模型权重 | `models/shap_analysis/` 图件 |
+| 10a | 太古代扩展应用集构建 | `06_archean_application/extended_archean_pool_analysis.py` | Liu 数据 + GeoROC 原始候选表 + PetDB 2.0 | `archean/outputs/extended_archean_pool/expanded_archean_raw.csv` 等 |
+| 10b | 克拉通名称规范（LLM 辅助） | `06_archean_application/standardize_craton_with_ai.py` | 扩展池预测表 | `extended_archean_pool/expanded_archean_basalt.csv`；经**年龄人工核对**并删除年龄为空记录后得到正式应用集 `expanded_archean_basalt_age_nonmissing.csv`（3,483 条） |
+| 10c | 太古代缺失编码预测（正式入口） | `06_archean_application/archean_vit_transformer_dualstream_predict_analysis.py`（`run_final_prediction()`） | 3,483 条应用集 + `quantile_params.json` + 模型权重 | `archean/outputs/archean_geodan_final/expanded_archean_{missing_mask,predictions}.csv`、主图 |
+| 10d | 适用域 / 域偏移诊断 | `06_archean_application/domain_shift_diagnostics.py` | 现代训练集 + 太古代集 | `archean/outputs/distribution_consistency/domain_shift_*` |
+| 10e | 分布一致性 | `06_archean_application/pca_distribution_consistency.py`、`training_application_distribution_consistency.py` | 现代全集 + 太古代集 | 一致性图件 |
+| 11 | 数据分布箱线图 | `07_figures/selected_element_boxplots.py` | `03_combined/01_basalt_number_year.csv` | `figures/selected_elements/` |
+
+> 辅助工具：`01_preprocessing/filter/georoc_filter_tuner_gui.py` 与
+> `petdb_filter_tuner_gui.py` 为**可选**交互式调参 GUI，用于探索筛选阈值；
+> 正式流程以 `extract_georoc.py` / `extract_petdb.py` 的固化规则为准。
 
 ---
 
 ## 关键约定（统一基准）
 
-- **最终归一化数据集**统一为 `06_normalized/05_normalize_basalt_{train,test}.csv`；
-  训练、SHAP、太古代脚本均读取此基准（已消除历史遗留的 `dataset_split_correct` /
-  `06_normalize_*` 命名分歧）。
+- **最终归一化数据集**统一为 `06_normalized/06_normalize_basalt_{train,test}.csv`；
+  训练、SHAP、太古代脚本均读取此基准。
+- **缺失 mask** 统一为 `05_imputed/03_{train,test}_missing_mask.csv`，
+  记录插补**之前**的原始缺失状态；模型训练与 SHAP 均将其作为第二通道。
 - **模型权重**统一输出/读取 `models/Full_Model_(ViT+Transformer)_best_seed.pth`。
-- **太古代不插补**：缺失值置 0，仅用训练集 `quantile_params.json` 做分位归一化，
-  不依赖任何全局 MissForest 模型。
+- **太古代缺失编码**：缺失值数值编码 `0` + mask 值 `1`，只用训练集
+  `quantile_params.json` 做分位归一化，不依赖任何现代插补模型；
+  正式预测结果以 `archean_geodan_final/expanded_archean_predictions.csv` 为准
+  （含 `pred_class_name`、`pred_prob_max`、`confidence_tier`、九类 `prob_*`、
+  `missing_feature_count_36` 及三类弧概率之和 `Arc_probability3`）。
 
 ---
 
 ## 运行顺序（最小复现）
 
 ```bash
-# 1–5 预处理
-python 01_preprocessing/filter/georoc_filter_tuner_gui.py   # GUI，交互筛选
-python 01_preprocessing/filter/petdb_filter_tuner_gui.py    # GUI，交互筛选
+# 1–3 预处理（GUI 为可选调参工具，不在正式链路内）
+python 01_preprocessing/filter/extract_georoc.py
+python 01_preprocessing/filter/extract_petdb.py
 python 01_preprocessing/combine_list.py
 python 01_preprocessing/split_train_test.py
-python 01_preprocessing/split_type.py
-python 01_preprocessing/outlier_detection_basalt.py
-# 6 插补
+# 4 全局插补 + 缺失 mask
 python 02_imputation/imputation_train_predict.py
-python 02_imputation/merge_imputed_trainset.py
-# 7–8 标准化 / 归一化
+# 5–7 标准化 / SMOTE / 归一化
 python 03_normalization/normalize_major_elements.py
+python 03_normalization/selective_smote.py
 python 03_normalization/normalize.py
-# 9 训练（需 GPU）
+# 8 训练（需 GPU）
 python 04_model/ablation_v4_vit_transformer.py
-# 10 SHAP
+# 9 SHAP
 python 05_interpretation/plot_shap_figure7_summary.py
-# 11 太古代应用
-python 06_archean_application/archean_s3_preprocess.py
+# 10 太古代应用（已有 3,483 条应用集时只需最后一步）
+python 06_archean_application/extended_archean_pool_analysis.py
+python 06_archean_application/standardize_craton_with_ai.py   # 需配置 LLM API
 python 06_archean_application/archean_vit_transformer_dualstream_predict_analysis.py
-# 12 数据分布图
+# 11 数据分布图
 python 07_figures/selected_element_boxplots.py
 ```

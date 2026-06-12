@@ -58,7 +58,7 @@ from sklearn.metrics import (
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import label_binarize
 from sklearn.svm import SVC
-from torch.optim import Adam
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
@@ -72,26 +72,30 @@ except ImportError:
 
 warnings.filterwarnings('ignore')
 
+# 中文注释：保留目标工程的统一路径配置，方便在另一台电脑上运行。
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.paths import TRAIN_NORM_CSV, TEST_NORM_CSV, MODELS_DIR
+from config.paths import MODELS_DIR, TRAIN_NORM_CSV, TEST_NORM_CSV, MASK_TRAIN_CSV, MASK_TEST_CSV
 
 # ════════════════════════════════════════════
 # 全局配置
 # ════════════════════════════════════════════
 # SEEDS          = [42, 123, 456, 789, 1024]
-SEEDS          = [42, 123, 456]
-PRINT_EVERY   = 40    # ← v4: 每 20 个 epoch 打印一次
-ML_PRINT_EVERY = 20   # ← v4: ML(MLP) 每 20 个 epoch 打印一次
+SEEDS          = [42, 123]
+PRINT_EVERY   = 100   # 中文注释：每10轮打印一次，避免长训练产生过量终端输出。
+ML_PRINT_EVERY = 100   # ← v4: ML(MLP) 每 20 个 epoch 打印一次
+# 中文注释：SMOTE后关闭类别加权，避免对少数类重复补偿。
+USE_CLASS_WEIGHTED_LOSS = False
 
 # SCI 期刊混淆矩阵配色方案（每个模型输出全部版本）
 SCI_CMAPS = [
     ('Blues',    'Blues'),      # 经典蓝色序列（最常见）
-    ('YlOrRd',   'YlOrRd'),     # 黄橙红渐变（暖色系）
-    ('Purples',  'Purples'),    # 紫色序列（优雅）
-    ('viridis',  'viridis'),    # 感知均匀（Nature/Science 推荐）
-    ('Oranges',  'Oranges'),    # 橙色序列（暖调清晰）
+    # ('YlOrRd',   'YlOrRd'),     # 黄橙红渐变（暖色系）
+    # ('Purples',  'Purples'),    # 紫色序列（优雅）
+    # ('viridis',  'viridis'),    # 感知均匀（Nature/Science 推荐）
+    # ('Oranges',  'Oranges'),    # 橙色序列（暖调清晰）
 ]
 
 
@@ -191,7 +195,94 @@ def reshape_to_image(X_2d):
     return X_2d.reshape(-1, 1, 6, 6).astype(np.float32)
 
 
-def load_presplit_csv(train_path, test_path, columns_to_extract, seq_columns=None):
+def _load_missing_masks(
+    train_mask_path,
+    test_mask_path,
+    train_row_count,
+    test_row_count,
+    columns_to_extract,
+    seq_columns,
+):
+    """读取原始缺失mask；SMOTE新增训练行统一记为0。"""
+    train_mask_raw = pd.read_csv(train_mask_path, encoding='utf-8-sig')
+    test_mask_raw = pd.read_csv(test_mask_path, encoding='utf-8-sig')
+
+    image_mask_columns = [
+        f'missing_mask__{column}' for column in columns_to_extract
+    ]
+    sequence_mask_columns = [
+        f'missing_mask__{column}' for column in seq_columns
+    ]
+    required_columns = sorted(set(image_mask_columns + sequence_mask_columns))
+    for dataset_name, mask_data in [
+        ('训练集', train_mask_raw),
+        ('测试集', test_mask_raw),
+    ]:
+        missing_columns = [
+            column for column in required_columns
+            if column not in mask_data.columns
+        ]
+        if missing_columns:
+            raise ValueError(
+                f'{dataset_name}缺失mask文件缺少列: {missing_columns}'
+            )
+
+    if len(train_mask_raw) > train_row_count:
+        raise ValueError('训练集缺失mask行数大于模型训练集行数')
+    if len(test_mask_raw) != test_row_count:
+        raise ValueError(
+            f'测试集缺失mask行数不一致: '
+            f'{len(test_mask_raw)} != {test_row_count}'
+        )
+
+    synthetic_count = train_row_count - len(train_mask_raw)
+    synthetic_mask = pd.DataFrame(
+        0,
+        index=np.arange(synthetic_count),
+        columns=train_mask_raw.columns,
+        dtype=np.uint8,
+    )
+    train_mask = pd.concat(
+        [train_mask_raw, synthetic_mask],
+        ignore_index=True,
+    )
+
+    train_img_mask = reshape_to_image(
+        train_mask[image_mask_columns].to_numpy(dtype=np.float32)
+    )
+    test_img_mask = reshape_to_image(
+        test_mask_raw[image_mask_columns].to_numpy(dtype=np.float32)
+    )
+    train_seq_mask = train_mask[
+        sequence_mask_columns
+    ].to_numpy(dtype=np.float32)[:, :, np.newaxis]
+    test_seq_mask = test_mask_raw[
+        sequence_mask_columns
+    ].to_numpy(dtype=np.float32)[:, :, np.newaxis]
+
+    print(
+        f'  缺失mask: 真实训练行={len(train_mask_raw)}，'
+        f'SMOTE新增行={synthetic_count}，测试行={len(test_mask_raw)}'
+    )
+    print(
+        f'  训练mask缺失率='
+        f'{train_mask_raw.to_numpy(dtype=float).mean():.2%}，'
+        f'测试mask缺失率='
+        f'{test_mask_raw.to_numpy(dtype=float).mean():.2%}'
+    )
+    return train_img_mask, train_seq_mask, test_img_mask, test_seq_mask
+
+
+def load_presplit_csv(
+    train_path,
+    test_path,
+    columns_to_extract,
+    seq_columns=None,
+    use_missing_mask=False,
+    train_mask_path=None,
+    test_mask_path=None,
+    cfb_target_count=None,
+):
     if seq_columns is None:
         seq_columns = COLUMNS_ELECTRODE_ORDER
     try:
@@ -222,6 +313,68 @@ def load_presplit_csv(train_path, test_path, columns_to_extract, seq_columns=Non
     X_test_img  = reshape_to_image(X_test_img_2d  / 255.0)
     X_train_seq = (X_train_seq_2d / 255.0)[:, :, np.newaxis].astype(np.float32)
     X_test_seq  = (X_test_seq_2d  / 255.0)[:, :, np.newaxis].astype(np.float32)
+
+    if use_missing_mask:
+        if train_mask_path is None or test_mask_path is None:
+            raise ValueError('启用缺失编码时必须提供训练集和测试集mask路径')
+        (
+            X_train_img_mask,
+            X_train_seq_mask,
+            X_test_img_mask,
+            X_test_seq_mask,
+        ) = _load_missing_masks(
+            train_mask_path,
+            test_mask_path,
+            len(df_train),
+            len(df_test),
+            columns_to_extract,
+            seq_columns,
+        )
+        # 中文注释：矩阵分支使用“数值+mask”两个通道，序列分支每个元素使用两个输入特征。
+        X_train_img = np.concatenate(
+            [X_train_img, X_train_img_mask], axis=1
+        )
+        X_test_img = np.concatenate(
+            [X_test_img, X_test_img_mask], axis=1
+        )
+        X_train_seq = np.concatenate(
+            [X_train_seq, X_train_seq_mask], axis=2
+        )
+        X_test_seq = np.concatenate(
+            [X_test_seq, X_test_seq_mask], axis=2
+        )
+
+    if cfb_target_count is not None:
+        cfb_label = 'CONTINENTAL FLOOD BASALT'
+        cfb_indices = np.flatnonzero(
+            df_train['TECTONIC SETTING'].astype(str).to_numpy() == cfb_label
+        )
+        if len(cfb_indices) < cfb_target_count:
+            raise ValueError(
+                f'CFB当前只有 {len(cfb_indices)} 条，'
+                f'不能欠采样到 {cfb_target_count}'
+            )
+        rng = np.random.default_rng(42)
+        selected_cfb = np.sort(
+            rng.choice(
+                cfb_indices,
+                size=cfb_target_count,
+                replace=False,
+            )
+        )
+        non_cfb_indices = np.flatnonzero(
+            df_train['TECTONIC SETTING'].astype(str).to_numpy() != cfb_label
+        )
+        keep_indices = np.sort(
+            np.concatenate([non_cfb_indices, selected_cfb])
+        )
+        X_train_img = X_train_img[keep_indices]
+        X_train_seq = X_train_seq[keep_indices]
+        y_train = y_train[keep_indices]
+        print(
+            f'  CFB欠采样: {len(cfb_indices)} -> {cfb_target_count}，'
+            f'训练集总数: {len(df_train)} -> {len(keep_indices)}'
+        )
 
     print(f'\n  训练集: {X_train_img.shape[0]} | 测试集: {X_test_img.shape[0]} | 类别数: {len(unique)}')
     print(f'  矩阵输入形状: {X_train_img.shape[1:]}')
@@ -295,9 +448,9 @@ class TransformerBlock(nn.Module):
 
 class CNNBranch(nn.Module):
     """仅用于对比模型 Cmp-2 (CNN-ViT-Transformer) 和 Cmp-3 (CNN Only)。"""
-    def __init__(self, dropout=0.2):
+    def __init__(self, in_channels=1, dropout=0.2):
         super().__init__()
-        self.conv1   = nn.Conv2d(1,  32, 3, padding=1)
+        self.conv1   = nn.Conv2d(in_channels, 32, 3, padding=1)
         self.bn1     = nn.BatchNorm2d(32)
         self.conv2   = nn.Conv2d(32, 64, 3, padding=1)
         self.bn2     = nn.BatchNorm2d(64)
@@ -319,21 +472,29 @@ class CNNBranch(nn.Module):
 class ViT_Transformer_DualStream(nn.Module):
     """
     增强版双流模型 (v2):
-      - 矩阵分支 / 序列分支均增加 CLS token,与 GAP 双路融合
+      - 矩阵分支 / 序列分支均增加CLS token，与GAP双路融合
       - 容量适度加宽 (embed_dim 64→96, heads 4→8)
       - 保持原 TransformerBlock(post-norm),不引入未验证的 stochastic depth
-      - 分类头融合 4 路特征: vit_cls + vit_gap + seq_cls + seq_gap
+      - 分类头融合4路特征: vit_cls + vit_gap + seq_cls + seq_gap
     """
     def __init__(self, num_classes, input_size=6, patch_size=2,
-                 embed_dim=96, num_heads=8, transformer_layers=2,
-                 ff_dim=192, dropout=0.1):
+                 embed_dim=128, num_heads=8, transformer_layers=2,
+                 ff_dim=256, dropout=0.15, use_missing_mask=False):
         super().__init__()
         self.num_patches = (input_size // patch_size) ** 2   # 9
         self.seq_len     = input_size * input_size           # 36
         self.embed_dim   = embed_dim
+        self.use_missing_mask = use_missing_mask
+        image_channels = 2 if use_missing_mask else 1
+        sequence_features = 2 if use_missing_mask else 1
 
         # ── 矩阵分支 (ViT) ────────────────────────────────────
-        self.patch_embed = PatchEmbedding(1, patch_size, embed_dim, self.num_patches)
+        self.patch_embed = PatchEmbedding(
+            image_channels,
+            patch_size,
+            embed_dim,
+            self.num_patches,
+        )
         self.vit_cls     = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.vit_cls_pos = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.vit_blocks  = nn.ModuleList([
@@ -343,7 +504,7 @@ class ViT_Transformer_DualStream(nn.Module):
         self.vit_norm    = nn.LayerNorm(embed_dim)
 
         # ── 序列分支 (Transformer) ────────────────────────────
-        self.seq_proj      = nn.Linear(1, embed_dim)
+        self.seq_proj      = nn.Linear(sequence_features, embed_dim)
         self.seq_norm      = nn.LayerNorm(embed_dim)
         self.seq_cls       = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.seq_pos_embed = nn.Parameter(
@@ -354,7 +515,7 @@ class ViT_Transformer_DualStream(nn.Module):
         ])
         self.seq_final_norm = nn.LayerNorm(embed_dim)
 
-        # ── 分类头: 4 路特征 (vit_cls + vit_gap + seq_cls + seq_gap) ──
+        # ── 分类头: 4路特征 (vit_cls + vit_gap + seq_cls + seq_gap) ──
         head_in = embed_dim * 4
         self.fusion = nn.Sequential(
             nn.Linear(head_in, 192),
@@ -376,32 +537,35 @@ class ViT_Transformer_DualStream(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward(self, x, x_seq):
-        B = x.size(0)
+        batch_size = x.size(0)
 
         # 矩阵分支
         vit_tokens = self.patch_embed(x)                       # (B, 9, D)
-        vit_cls    = self.vit_cls.expand(B, -1, -1) + self.vit_cls_pos
+        vit_cls = self.vit_cls.expand(batch_size, -1, -1)
+        vit_cls = vit_cls + self.vit_cls_pos
         vit_tokens = torch.cat([vit_cls, vit_tokens], dim=1)   # (B, 10, D)
         for blk in self.vit_blocks:
             vit_tokens = blk(vit_tokens)
-        vit_tokens   = self.vit_norm(vit_tokens)
-        vit_cls_out  = vit_tokens[:, 0]
-        vit_gap_out  = vit_tokens[:, 1:].mean(dim=1)
+        vit_tokens  = self.vit_norm(vit_tokens)
+        vit_cls_out = vit_tokens[:, 0]
+        vit_gap_out = vit_tokens[:, 1:].mean(dim=1)
 
         # 序列分支
         seq_tokens = self.seq_norm(self.seq_proj(x_seq))       # (B, 36, D)
-        seq_cls    = self.seq_cls.expand(B, -1, -1)
+        seq_cls = self.seq_cls.expand(batch_size, -1, -1)
         seq_tokens = torch.cat([seq_cls, seq_tokens], dim=1)   # (B, 37, D)
         seq_tokens = seq_tokens + self.seq_pos_embed
         for blk in self.seq_blocks:
             seq_tokens = blk(seq_tokens)
-        seq_tokens   = self.seq_final_norm(seq_tokens)
-        seq_cls_out  = seq_tokens[:, 0]
-        seq_gap_out  = seq_tokens[:, 1:].mean(dim=1)
+        seq_tokens  = self.seq_final_norm(seq_tokens)
+        seq_cls_out = seq_tokens[:, 0]
+        seq_gap_out = seq_tokens[:, 1:].mean(dim=1)
 
-        # 四路融合
-        fused = torch.cat([vit_cls_out, vit_gap_out,
-                           seq_cls_out, seq_gap_out], dim=1)
+        # 中文注释：恢复CLS与GAP四路融合，以保留两种聚合方式的互补信息。
+        fused = torch.cat(
+            [vit_cls_out, vit_gap_out, seq_cls_out, seq_gap_out],
+            dim=1,
+        )
         return self.fusion(fused)
 
 
@@ -416,11 +580,14 @@ class Ablation_ViT_Only(nn.Module):
     """
     def __init__(self, num_classes, input_size=6, patch_size=2,
                  embed_dim=64, num_heads=4, transformer_layers=2,
-                 ff_dim=128, dropout=0.2):
+                 ff_dim=128, dropout=0.2, use_missing_mask=False):
         super().__init__()
         self.num_patches = (input_size // patch_size) ** 2
+        image_channels = 2 if use_missing_mask else 1
 
-        self.patch_embed = PatchEmbedding(1, patch_size, embed_dim, self.num_patches)
+        self.patch_embed = PatchEmbedding(
+            image_channels, patch_size, embed_dim, self.num_patches
+        )
         self.vit_blocks  = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, ff_dim, dropout)
             for _ in range(transformer_layers)
@@ -457,10 +624,11 @@ class Ablation_Transformer_Only(nn.Module):
     """Abl-2: 仅使用序列分支的 Transformer，回答'矩阵分支是否必要'。"""
     def __init__(self, num_classes, input_size=6,
                  embed_dim=64, num_heads=4, transformer_layers=2,
-                 ff_dim=128, dropout=0.2):
+                 ff_dim=128, dropout=0.2, use_missing_mask=False):
         super().__init__()
+        sequence_features = 2 if use_missing_mask else 1
         self.seq_len       = input_size * input_size
-        self.seq_proj      = nn.Linear(1, embed_dim)
+        self.seq_proj      = nn.Linear(sequence_features, embed_dim)
         self.seq_norm      = nn.LayerNorm(embed_dim)
         self.seq_pos_embed = nn.Parameter(
             torch.randn(1, self.seq_len, embed_dim) * 0.02)
@@ -504,20 +672,24 @@ class Ablation_NoPositionalEncoding(nn.Module):
     """
     def __init__(self, num_classes, input_size=6, patch_size=2,
                  embed_dim=64, num_heads=4, transformer_layers=2,
-                 ff_dim=128, dropout=0.2):
+                 ff_dim=128, dropout=0.2, use_missing_mask=False):
         super().__init__()
         self.num_patches = (input_size // patch_size) ** 2
         self.seq_len     = input_size * input_size
+        image_channels = 2 if use_missing_mask else 1
+        sequence_features = 2 if use_missing_mask else 1
 
         # 矩阵分支: 无 PE 的 PatchEmbedding
-        self.patch_embed = PatchEmbeddingNoPos(1, patch_size, embed_dim, self.num_patches)
+        self.patch_embed = PatchEmbeddingNoPos(
+            image_channels, patch_size, embed_dim, self.num_patches
+        )
         self.vit_blocks  = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, ff_dim, dropout)
             for _ in range(transformer_layers)
         ])
 
         # 序列分支: 不加 pos_embed
-        self.seq_proj   = nn.Linear(1, embed_dim)
+        self.seq_proj   = nn.Linear(sequence_features, embed_dim)
         self.seq_norm   = nn.LayerNorm(embed_dim)
         self.seq_blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, ff_dim, dropout)
@@ -570,9 +742,12 @@ class ConvBlock(nn.Module):
 
 
 class CNN_BiLSTM(nn.Module):
-    def __init__(self, num_classes, bilstm_hidden=32, dropout=0.5):
+    def __init__(self, num_classes, bilstm_hidden=32, dropout=0.5,
+                 use_missing_mask=False):
         super().__init__()
-        self.cnn_conv1   = nn.Conv2d(1,  16, 3, padding=1)
+        image_channels = 2 if use_missing_mask else 1
+        sequence_features = 2 if use_missing_mask else 1
+        self.cnn_conv1   = nn.Conv2d(image_channels, 16, 3, padding=1)
         self.cnn_bn1     = nn.BatchNorm2d(16)
         self.cnn_blk1    = ConvBlock(16, dropout=dropout)
         self.cnn_conv2   = nn.Conv2d(16, 32, 3, padding=1)
@@ -582,7 +757,7 @@ class CNN_BiLSTM(nn.Module):
         self.cnn_fc_bn   = nn.BatchNorm1d(64)
         self.cnn_fc_drop = nn.Dropout(dropout)
 
-        self.seq_proj      = nn.Linear(1, bilstm_hidden)
+        self.seq_proj      = nn.Linear(sequence_features, bilstm_hidden)
         self.seq_proj_bn   = nn.BatchNorm1d(bilstm_hidden)
         self.seq_proj_drop = nn.Dropout(dropout)
 
@@ -618,7 +793,7 @@ class CNN_BiLSTM(nn.Module):
         c = self.cnn_fc_drop(F.relu(self.cnn_fc_bn(self.cnn_fc(c.flatten(1)))))
 
         B, T, _ = x_seq.shape
-        r = self.seq_proj(x_seq.reshape(B * T, 1))
+        r = self.seq_proj(x_seq.reshape(B * T, -1))
         r = self.seq_proj_drop(F.relu(self.seq_proj_bn(r))).reshape(B, T, -1)
         r, _ = self.bilstm1(r)
         r = self.rnn_bn1(r.transpose(1, 2)).transpose(1, 2)
@@ -639,18 +814,22 @@ class CNN_ViT_Transformer(nn.Module):
     """
     def __init__(self, num_classes, input_size=6, patch_size=2,
                  embed_dim=64, num_heads=4, transformer_layers=2,
-                 ff_dim=128, dropout=0.1):
+                 ff_dim=128, dropout=0.1, use_missing_mask=False):
         super().__init__()
         self.num_patches = (input_size // patch_size) ** 2
         self.seq_len     = input_size * input_size
+        image_channels = 2 if use_missing_mask else 1
+        sequence_features = 2 if use_missing_mask else 1
 
-        self.cnn         = CNNBranch(dropout=0.2)
+        self.cnn         = CNNBranch(
+            in_channels=image_channels, dropout=0.2
+        )
         self.patch_embed = PatchEmbedding(64, patch_size, embed_dim, self.num_patches)
         self.vit_blocks  = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, ff_dim, dropout)
             for _ in range(transformer_layers)
         ])
-        self.seq_proj      = nn.Linear(1, embed_dim)
+        self.seq_proj      = nn.Linear(sequence_features, embed_dim)
         self.seq_norm      = nn.LayerNorm(embed_dim)
         self.seq_pos_embed = nn.Parameter(torch.randn(1, self.seq_len, embed_dim) * 0.02)
         self.seq_blocks    = nn.ModuleList([
@@ -690,9 +869,12 @@ class CNN_ViT_Transformer(nn.Module):
 # =============================================================
 
 class Baseline_CNN_Only(nn.Module):
-    def __init__(self, num_classes, dropout=0.3):
+    def __init__(self, num_classes, dropout=0.3, use_missing_mask=False):
         super().__init__()
-        self.cnn = CNNBranch(dropout=0.4)
+        image_channels = 2 if use_missing_mask else 1
+        self.cnn = CNNBranch(
+            in_channels=image_channels, dropout=0.4
+        )
         self.classifier = nn.Sequential(
             nn.Linear(64, 128),
             nn.LayerNorm(128), nn.GELU(), nn.Dropout(dropout),
@@ -758,8 +940,14 @@ def train_epoch(model, dataloader, criterion, optimizer, device,
                 epoch, total_epochs, mixup_alpha=0):
     model.train()
     total_loss = correct = total = 0
-    pbar = tqdm(dataloader, desc=f'  Epoch {epoch}/{total_epochs}',
-                leave=False, ncols=100)
+    # 中文注释：每个epoch显示批次训练进度，完整指标仍按PRINT_EVERY间隔打印。
+    pbar = tqdm(
+        dataloader,
+        desc=f'  Epoch {epoch}/{total_epochs}',
+        leave=False,
+        ncols=100,
+        disable=False,
+    )
     for X_img, X_seq, y in pbar:
         X_img, X_seq, y = X_img.to(device), X_seq.to(device), y.to(device)
         mixed_img, mixed_seq, y_a, y_b, lam = mixup_data(
@@ -824,10 +1012,24 @@ def run_single_experiment(model_factory, model_name,
     val_loader   = make_dataloader(
         X_val_img,   X_val_seq,   y_val,   64, shuffle=False, drop_last=False)
 
-    criterion     = nn.CrossEntropyLoss()
-    target_lr     = 2e-4
+    if USE_CLASS_WEIGHTED_LOSS:
+        # 中文注释：权重只由当前训练集标签计算，不读取测试集分布。
+        class_counts = np.bincount(y_train, minlength=num_classes).astype(np.float32)
+        class_weights = len(y_train) / (num_classes * class_counts)
+        class_weights = class_weights / class_weights.mean()
+        class_weights_tensor = torch.tensor(
+            class_weights,
+            dtype=torch.float32,
+            device=device,
+        )
+        criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
+        print(f'  类别加权交叉熵: 开启，权重={np.round(class_weights, 4).tolist()}')
+    else:
+        criterion = nn.CrossEntropyLoss()
+        print('  类别加权交叉熵: 关闭')
+    target_lr     = 3e-4
     warmup_epochs = 10
-    optimizer = Adam(model.parameters(), lr=target_lr, weight_decay=5e-4)
+    optimizer = AdamW(model.parameters(), lr=target_lr, weight_decay=0)
     try:
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.3,
                                       patience=15, verbose=True)
@@ -837,8 +1039,33 @@ def run_single_experiment(model_factory, model_name,
     loss_tracker = BestModelTracker()
     acc_tracker  = BestAccTracker()
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
+    # 中文注释：断点文件直接在代码中配置；留空表示从头开始训练。
+    checkpoint_path = ''
+    start_epoch = 1
 
-    for epoch in range(1, epochs + 1):
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
+        if int(checkpoint.get('seed', seed)) == seed:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            history = checkpoint['history']
+            acc_tracker.best_acc = checkpoint['best_acc']
+            acc_tracker.best_epoch = checkpoint['best_epoch']
+            acc_tracker.best_model = checkpoint['best_model']
+            loss_tracker.best_loss = checkpoint['best_loss']
+            loss_tracker.best_model = checkpoint['best_loss_model']
+            start_epoch = int(checkpoint['epoch']) + 1
+            print(
+                f'  [断点续训] 从 Epoch {start_epoch}/{epochs} 继续: '
+                f'{checkpoint_path}'
+            )
+
+    for epoch in range(start_epoch, epochs + 1):
         if epoch <= warmup_epochs:
             warmup_lr = target_lr * epoch / warmup_epochs
             for pg in optimizer.param_groups:
@@ -866,13 +1093,34 @@ def run_single_experiment(model_factory, model_name,
                   f'Train Loss: {tr_loss:.4f} Acc: {tr_acc:.4f} | '
                   f'Val Loss: {va_loss:.4f} Acc: {va_acc:.4f}{best_flag}')
 
+        if checkpoint_path:
+            checkpoint_directory = os.path.dirname(checkpoint_path)
+            if checkpoint_directory:
+                os.makedirs(checkpoint_directory, exist_ok=True)
+            torch.save(
+                {
+                    'epoch': epoch,
+                    'seed': seed,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'history': history,
+                    'best_acc': acc_tracker.best_acc,
+                    'best_epoch': acc_tracker.best_epoch,
+                    'best_model': acc_tracker.best_model,
+                    'best_loss': loss_tracker.best_loss,
+                    'best_loss_model': loss_tracker.best_model,
+                },
+                checkpoint_path,
+            )
+
     model.load_state_dict(acc_tracker.best_model)
     va_loss, va_acc, y_pred, y_probs, y_true = evaluate(
         model, val_loader, criterion, device)
 
     elapsed = time.time() - t_start
     h, m, s = int(elapsed // 3600), int((elapsed % 3600) // 60), int(elapsed % 60)
-    print(f'\n  ✔ 完成（seed={seed}），耗时: {h:02d}h {m:02d}m {s:02d}s')
+    print(f'\n  [完成] seed={seed}，耗时: {h:02d}h {m:02d}m {s:02d}s')
     print(f'  最高验证准确率: Epoch {acc_tracker.best_epoch}  Val Acc={acc_tracker.best_acc:.4f}')
 
     precision = precision_score(y_true, y_pred, average='weighted', zero_division=0)
@@ -971,28 +1219,30 @@ def run_experiment_multi_seed(model_factory, model_name,
                   int(total_elapsed % 60))
 
     print(f'\n{"=" * 65}')
-    print(f'  ✔ {model_name}  多种子汇总 ({n_seeds} 个种子)')
+    print(f'  [完成] {model_name}  多种子汇总 ({n_seeds} 个种子)')
     print(f'    Accuracy : {agg["accuracy"]:.4f} ± {agg["accuracy_std"]:.4f}')
     print(f'    F1-Score : {agg["f1_score"]:.4f} ± {agg["f1_score_std"]:.4f}')
     print(f'    Macro F1 : {agg["macro_f1"]:.4f} ± {agg["macro_f1_std"]:.4f}')
     print(f'    mAP      : {agg["mAP"]:.4f} ± {agg["mAP_std"]:.4f}')
+    print(f'    最优种子 : {seeds[best_seed_idx]}  '
+          f'(Acc={best_seed_r["accuracy"]:.4f})')
     print(f'    总耗时   : {th:02d}h {tm:02d}m {ts:02d}s')
     print(f'{"=" * 65}')
 
     return {
         'model_name':         model_name,
         'num_params':         per_seed_results[0]['num_params'],
-        'accuracy':           agg['accuracy'],
-        'precision':          agg['precision'],
-        'recall':             agg['recall'],
-        'f1_score':           agg['f1_score'],
-        'macro_f1':           agg['macro_f1'],
-        'mAP':                agg['mAP'],
-        'val_loss':           agg['val_loss'],
+        'accuracy':           best_seed_r['accuracy'],
+        'precision':          best_seed_r['precision'],
+        'recall':             best_seed_r['recall'],
+        'f1_score':           best_seed_r['f1_score'],
+        'macro_f1':           best_seed_r['macro_f1'],
+        'mAP':                best_seed_r['mAP'],
+        'val_loss':           best_seed_r['val_loss'],
         'best_acc_epoch':     best_seed_r['best_acc_epoch'],
         'y_true':             best_seed_r['y_true'],
         'y_pred':             best_seed_r['y_pred'],
-        'y_probs':             best_seed_r['y_probs'],
+        'y_probs':            best_seed_r['y_probs'],
         'history':            best_seed_r['history'],
         'best_state_dict':    best_seed_r['best_state_dict'],
         'elapsed_sec':        total_elapsed,
@@ -1006,6 +1256,8 @@ def run_experiment_multi_seed(model_factory, model_name,
         'per_seed_results':   per_seed_results,
         'seeds':              seeds,
         'best_seed':          seeds[best_seed_idx],
+        'seed_mean_accuracy': agg['accuracy'],
+        'seed_mean_macro_f1': agg['macro_f1'],
     }
 
 
@@ -1816,13 +2068,24 @@ def save_per_seed_csv(all_dl_results, output_dir):
 # =============================================================
 
 if __name__ == '__main__':
-    # 路径统一由 config/paths.py 管理（最终归一化训练/测试集 + 模型权重输出目录）。
+    # 中文注释：训练集、测试集和缺失掩码使用目标工程中的完整路径。
+    # 中文注释：使用原始空间全局插补、无水标准化和分位数编码后的主流程数据。
     TRAIN_FILE = str(TRAIN_NORM_CSV)
     TEST_FILE = str(TEST_NORM_CSV)
+    TRAIN_MASK_FILE = str(MASK_TRAIN_CSV)
+    TEST_MASK_FILE = str(MASK_TEST_CSV)
+
+    # 中文注释：正文最终方案固定为显式缺失编码，并保留原始6920条CFB训练样品。
+    USE_MISSING_MASK = True
+    CFB_TARGET_COUNT = None
     output_dir = str(MODELS_DIR)
-    EPOCHS           = 200
+
+    # 中文注释：训练轮数和随机种子直接在代码中配置，不再读取环境变量。
+    EPOCHS = 200
+    SEEDS = [42, 123]
     MIXUP_ALPHA      = 0
-    RUN_ML_BASELINES = True
+    # 中文注释：本轮只运行“原始空间全局插补 + CR及四个少数类SMOTE到3000 + 普通交叉熵”。
+    RUN_ML_BASELINES = False
 
     # ════════════════════════════════════════════
     # 列排列方案选择
@@ -1857,26 +2120,56 @@ if __name__ == '__main__':
     os.makedirs(output_dir, exist_ok=True)
 
     print(f'\n加载数据... (列排列方案: {COLUMN_ORDER_SCHEME})')
+    print(f'GeoDAN显式缺失编码: {"开启" if USE_MISSING_MASK else "关闭"}')
     (X_train_img, X_train_seq, y_train,
      X_test_img,  X_test_seq,  y_test, unique_labels) = load_presplit_csv(
-        TRAIN_FILE, TEST_FILE, columns_to_extract, seq_columns)
+        TRAIN_FILE,
+        TEST_FILE,
+        columns_to_extract,
+        seq_columns,
+        use_missing_mask=USE_MISSING_MASK,
+        train_mask_path=TRAIN_MASK_FILE,
+        test_mask_path=TEST_MASK_FILE,
+        cfb_target_count=CFB_TARGET_COUNT,
+    )
     num_classes = len(unique_labels)
 
     ALL_EXPERIMENTS = {
         'Full':  ('Full Model\n(ViT+Transformer)',
-                  lambda: ViT_Transformer_DualStream(num_classes=num_classes)),
+                  lambda: ViT_Transformer_DualStream(
+                      num_classes=num_classes,
+                      use_missing_mask=USE_MISSING_MASK,
+                  )),
         'Abl-1': ('Abl-1\nViT Only (Matrix)',
-                  lambda: Ablation_ViT_Only(num_classes=num_classes)),
+                  lambda: Ablation_ViT_Only(
+                      num_classes=num_classes,
+                      use_missing_mask=USE_MISSING_MASK,
+                  )),
         'Abl-2': ('Abl-2\nTransformer Only (Seq)',
-                  lambda: Ablation_Transformer_Only(num_classes=num_classes)),
+                  lambda: Ablation_Transformer_Only(
+                      num_classes=num_classes,
+                      use_missing_mask=USE_MISSING_MASK,
+                  )),
         'Abl-3': ('Abl-3\nw/o Pos Encoding',
-                  lambda: Ablation_NoPositionalEncoding(num_classes=num_classes)),
+                  lambda: Ablation_NoPositionalEncoding(
+                      num_classes=num_classes,
+                      use_missing_mask=USE_MISSING_MASK,
+                  )),
         'Cmp-1': ('Cmp-1\nCNN-BiLSTM (EMSPN)',
-                  lambda: CNN_BiLSTM(num_classes=num_classes)),
+                  lambda: CNN_BiLSTM(
+                      num_classes=num_classes,
+                      use_missing_mask=USE_MISSING_MASK,
+                  )),
         'Cmp-2': ('Cmp-2\nCNN-ViT-Transformer',
-                  lambda: CNN_ViT_Transformer(num_classes=num_classes)),
+                  lambda: CNN_ViT_Transformer(
+                      num_classes=num_classes,
+                      use_missing_mask=USE_MISSING_MASK,
+                  )),
         'Cmp-3': ('Cmp-3\nCNN Only',
-                  lambda: Baseline_CNN_Only(num_classes=num_classes)),
+                  lambda: Baseline_CNN_Only(
+                      num_classes=num_classes,
+                      use_missing_mask=USE_MISSING_MASK,
+                  )),
     }
     # FULL_CONFIG = dict(embed_dim=64, num_heads=4,
     #                    transformer_layers=2, ff_dim=128, dropout=0.1)
@@ -1929,7 +2222,8 @@ if __name__ == '__main__':
             epochs=EPOCHS, mixup_alpha=MIXUP_ALPHA,
             seeds=SEEDS,
             output_dir=output_dir,
-            save_per_seed_weights=True,
+            # 中文注释：仅保留最终最优种子权重，避免生成多个pth文件。
+            save_per_seed_weights=False,
         )
         all_results.append(result)
 

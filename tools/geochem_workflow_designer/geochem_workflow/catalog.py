@@ -342,7 +342,7 @@ NODE_TEMPLATES = [
         "label": "SMOTE 过采样",
         "category": "Balance",
         "runnable": True,
-        "description": "Balance the training set to a fixed target size per tectonic setting.",
+        "description": "Oversample selected training classes to explicit targets; test data is never sampled.",
         "params": [
             {
                 "key": "input_path",
@@ -359,11 +359,18 @@ NODE_TEMPLATES = [
             {"key": "label_column", "label": "Label Column", "type": "text", "default": "TECTONIC SETTING"},
             {"key": "target_count", "label": "Target Per Class", "type": "number", "default": 7000},
             {
+                "key": "class_targets",
+                "label": "Selected Class Targets (LABEL=COUNT)",
+                "type": "textarea",
+                "default": "Island arc=2200\nBACK-ARC_BASIN=2200\nIntra-oceanic arc=2200\nOCEANIC PLATEAU=2200",
+            },
+            {
                 "key": "feature_columns",
                 "label": "Feature Columns",
                 "type": "textarea",
                 "default": FEATURE_COLUMNS,
             },
+            {"key": "k_neighbors", "label": "K Neighbors", "type": "number", "default": 5},
             {"key": "random_state", "label": "Random Seed", "type": "number", "default": 42},
         ],
     },

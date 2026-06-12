@@ -1,6 +1,6 @@
 {
   "name": "basalt_preprocess_to_traintest",
-  "description": "玄武岩数据预处理流程：从 GEOROC / PetDB 筛选到产出最终训练集/测试集（05_normalize_basalt_{train,test}.csv）。不含模型训练及下游分析。{repo_root} 指向项目根。",
+  "description": "玄武岩数据预处理流程：从 GEOROC / PetDB 筛选到产出最终训练集/测试集（06_normalize_basalt_{train,test}.csv）。不含模型训练及下游分析。{repo_root} 指向项目根。",
   "nodes": [
     {
       "id": "n1",
@@ -8,7 +8,7 @@
       "title": "流程说明 / 路径约定",
       "position": { "x": 40, "y": 40 },
       "params": {
-        "content": "数据预处理流程：GEOROC/PetDB 筛选 → 合并 → 切分 → 按构造环境拆分 → IQR → 按类别 MissForest 插补 → 主量无水标准化 → 分位数分箱归一化 → 最终训练集/测试集。\n\n占位符：{python_exe}=运行 app.py 的解释器；{repo_root}=项目根。脚本路径由 config/paths.py 统一管理；插补/归一化的 fit 仅用训练集，测试集只 transform（防数据泄露）。"
+        "content": "数据预处理流程：GEOROC/PetDB 规则筛选 → 合并 → 切分 → 全局 RF 插补 + 缺失 mask → 主量无水标准化 → 选择性 SMOTE（仅训练集）→ 分位数分箱归一化 → 最终训练集/测试集。\n\n占位符：{python_exe}=运行 app.py 的解释器；{repo_root}=项目根。脚本路径由 config/paths.py 统一管理；插补/SMOTE/分位数的 fit 仅用训练集（分位数从 SMOTE 前训练集拟合），测试集只 transform（防数据泄露）。"
       }
     },
     {
@@ -17,28 +17,28 @@
       "title": "输入起点（外部已就位）",
       "position": { "x": 40, "y": 260 },
       "params": {
-        "content": "前置输入应已放入 data/：\n- 00_raw/ 原始 GEOROC、PetDB\n- 01_cm_reclass_input/ 汇聚边缘细分产出（含 basalt_refined_expanded.csv，由独立项目 convergent_margin_reclass 生成，不在本流程内）。"
+        "content": "前置输入应已放入 data/：\n- 00_raw/ 原始 GEOROC（含 references_structured.csv）、PetDB 2.0 合并表 petdbv2_merged.csv\n- 01_cm_reclass_input/ 汇聚边缘细分产出（含 basalt_refined_expanded.csv，由独立项目 convergent_margin_reclass 生成，不在本流程内）。\n\n提示：01_preprocessing/filter 下的 *_filter_tuner_gui.py 为可选交互式调参工具，正式筛选入口为 extract_georoc.py / extract_petdb.py。"
       }
     },
     {
       "id": "n3",
       "type": "command_task",
-      "title": "1a. GEOROC 筛选（交互 GUI）",
+      "title": "1a. GEOROC 筛选（规则固化）",
       "position": { "x": 340, "y": 120 },
       "params": {
-        "label": "georoc_filter_tuner_gui.py",
-        "command": "\"{python_exe}\" \"{repo_root}\\01_preprocessing\\filter\\georoc_filter_tuner_gui.py\"",
+        "label": "extract_georoc.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\01_preprocessing\\filter\\extract_georoc.py\"",
         "workdir": "{repo_root}"
       }
     },
     {
       "id": "n4",
       "type": "command_task",
-      "title": "1b. PetDB 筛选（交互 GUI）",
+      "title": "1b. PetDB 筛选（规则固化）",
       "position": { "x": 340, "y": 320 },
       "params": {
-        "label": "petdb_filter_tuner_gui.py",
-        "command": "\"{python_exe}\" \"{repo_root}\\01_preprocessing\\filter\\petdb_filter_tuner_gui.py\"",
+        "label": "extract_petdb.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\01_preprocessing\\filter\\extract_petdb.py\"",
         "workdir": "{repo_root}"
       }
     },
@@ -67,30 +67,8 @@
     {
       "id": "n7",
       "type": "command_task",
-      "title": "4. 训练集按构造环境拆分",
-      "position": { "x": 1140, "y": 120 },
-      "params": {
-        "label": "split_type.py",
-        "command": "\"{python_exe}\" \"{repo_root}\\01_preprocessing\\split_type.py\"",
-        "workdir": "{repo_root}"
-      }
-    },
-    {
-      "id": "n8",
-      "type": "command_task",
-      "title": "5. IQR 去离群",
-      "position": { "x": 1400, "y": 120 },
-      "params": {
-        "label": "outlier_detection_basalt.py",
-        "command": "\"{python_exe}\" \"{repo_root}\\01_preprocessing\\outlier_detection_basalt.py\"",
-        "workdir": "{repo_root}"
-      }
-    },
-    {
-      "id": "n9",
-      "type": "command_task",
-      "title": "6. 按类别 MissForest 插补（train fit / test transform）",
-      "position": { "x": 1660, "y": 120 },
+      "title": "4. 全局 RF 插补 + 缺失 mask（train fit / test transform）",
+      "position": { "x": 1140, "y": 220 },
       "params": {
         "label": "imputation_train_predict.py",
         "command": "\"{python_exe}\" \"{repo_root}\\02_imputation\\imputation_train_predict.py\"",
@@ -98,21 +76,10 @@
       }
     },
     {
-      "id": "n10",
+      "id": "n8",
       "type": "command_task",
-      "title": "7. 合并训练集插补结果",
-      "position": { "x": 1920, "y": 120 },
-      "params": {
-        "label": "merge_imputed_trainset.py",
-        "command": "\"{python_exe}\" \"{repo_root}\\02_imputation\\merge_imputed_trainset.py\"",
-        "workdir": "{repo_root}"
-      }
-    },
-    {
-      "id": "n11",
-      "type": "command_task",
-      "title": "8. 主量无水标准化（train+test 一次跑完）",
-      "position": { "x": 2180, "y": 220 },
+      "title": "5. 主量无水标准化（train+test 一次跑完）",
+      "position": { "x": 1400, "y": 220 },
       "params": {
         "label": "normalize_major_elements.py",
         "command": "\"{python_exe}\" \"{repo_root}\\03_normalization\\normalize_major_elements.py\"",
@@ -120,10 +87,21 @@
       }
     },
     {
-      "id": "n12",
+      "id": "n9",
       "type": "command_task",
-      "title": "9. 分位数分箱归一化（train fit→transform test）",
-      "position": { "x": 2440, "y": 220 },
+      "title": "6. 选择性 SMOTE（仅训练集，5 类补到 3000）",
+      "position": { "x": 1660, "y": 220 },
+      "params": {
+        "label": "selective_smote.py",
+        "command": "\"{python_exe}\" \"{repo_root}\\03_normalization\\selective_smote.py\"",
+        "workdir": "{repo_root}"
+      }
+    },
+    {
+      "id": "n10",
+      "type": "command_task",
+      "title": "7. 分位数分箱归一化（SMOTE 前训练集 fit→transform）",
+      "position": { "x": 1920, "y": 220 },
       "params": {
         "label": "normalize.py",
         "command": "\"{python_exe}\" \"{repo_root}\\03_normalization\\normalize.py\"",
@@ -131,12 +109,12 @@
       }
     },
     {
-      "id": "n13",
+      "id": "n11",
       "type": "note",
       "title": "输出：最终训练集 / 测试集",
-      "position": { "x": 2720, "y": 220 },
+      "position": { "x": 2200, "y": 220 },
       "params": {
-        "content": "产出：\n- data/06_normalized/05_normalize_basalt_train.csv\n- data/06_normalized/05_normalize_basalt_test.csv\n- data/06_normalized/quantile_params.json（训练集分位参数）\n\n即可直接喂入模型训练。提示：筛选(1a/1b)为交互式 GUI 会弹窗，需手动操作后关闭；其余节点非交互、可顺序自动执行。"
+        "content": "产出：\n- data/06_normalized/06_normalize_basalt_train.csv（SMOTE 后）\n- data/06_normalized/06_normalize_basalt_train_no_smote.csv\n- data/06_normalized/06_normalize_basalt_test.csv\n- data/06_normalized/quantile_params.json（SMOTE 前训练集分位参数）\n- data/05_imputed/03_{train,test}_missing_mask.csv（模型第二通道）\n\n即可直接喂入 04_model/ablation_v4_vit_transformer.py（显式缺失编码训练）。所有节点均为非交互、可顺序自动执行。"
       }
     }
   ],
@@ -151,9 +129,6 @@
     { "id": "e8", "source": "n7", "target": "n8" },
     { "id": "e9", "source": "n8", "target": "n9" },
     { "id": "e10", "source": "n9", "target": "n10" },
-    { "id": "e11", "source": "n10", "target": "n11" },
-    { "id": "e12", "source": "n9", "target": "n11" },
-    { "id": "e13", "source": "n11", "target": "n12" },
-    { "id": "e14", "source": "n12", "target": "n13" }
+    { "id": "e11", "source": "n10", "target": "n11" }
   ]
 }

@@ -67,7 +67,8 @@ N_BACKGROUND = 1000
 BATCH_SIZE = 50
 RANDOM_SEED = 42
 MODEL_WEIGHT_PATH = MODEL_PATH
-OUTPUT_PANEL_DIR = os.path.join(OUTPUT_DIR, 'figure7_panels')
+# 中文注释：输出目录复用 SHAP 基础脚本的 OUTPUT_DIR（config/paths.py 的 MODELS_DIR 下）。
+OUTPUT_PANEL_DIR = os.path.join(base.OUTPUT_DIR, 'figure7_panels')
 DRAW_BEESWARM = True
 
 # ── 蜂窝图(d)密度控制：每行随机抽样上限 + 点样式（只影响绘图，不改 SHAP 计算）──

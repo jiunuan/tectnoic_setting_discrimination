@@ -1,14 +1,16 @@
 """
 ViT-Transformer Dual-Stream 玄武岩构造环境判别 —— SHAP 可解释性分析
 =============================================================
-模型结构：双分支（无 CNN）
-  - ViT 矩阵分支：输入 (B, 1, 6, 6)，特征排列由 COLUMNS_IMG_ORDER 决定
-  - 序列 Transformer 分支：输入 (B, 36, 1)，特征排列由 COLUMNS_ELECTRODE_ORDER 决定
-    （按不相容性从高到低排列，与训练脚本 SEQUENCE_COLUMNS_V2 一致）
+模型结构：双分支（无 CNN），与正式 GeoDAN（ablation_v4_vit_transformer.py，显式缺失编码）一致
+  - ViT 矩阵分支：输入 (B, 2, 6, 6)，通道0=分位数数值、通道1=缺失mask；
+    特征排列由 COLUMNS_IMG_ORDER 决定（v1=元素周期表顺序）
+  - 序列 Transformer 分支：输入 (B, 36, 2)，每个元素携带 [数值, 缺失mask] 两个特征；
+    特征排列由 COLUMNS_ELECTRODE_ORDER 决定（v1=电极电势序列）
+  - embed_dim=128, num_heads=8, transformer_layers=2, ff_dim=256
 
 处理策略：
-  1. 对两路分支分别用 shap.GradientExplainer 计算梯度 SHAP 值
-  2. 按特征名将两路 SHAP 值对齐后相加，得到每个元素的综合重要性
+  1. SHAP 输入为每行 72 维 [36 数值 | 36 缺失mask]，wrapper 内部重排成两分支双通道输入
+  2. 用 shap.GradientExplainer 计算梯度 SHAP 值，取“数值通道”的 36 维归因用于绘图
   3. 输出：堆叠条形图（所有类别汇总）、各类别 violin/beeswarm 图
 
 绘图（SCI 出版风格）：
@@ -46,18 +48,32 @@ warnings.filterwarnings('ignore')
 #       GEODAN_OUTPUT_DIR    : 输出根目录（SHAP 子目录在其下）
 # ══════════════════════════════════════════════════════════════
 import os as _os
-import sys as _sys
-from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
-from config.paths import MAIN_MODEL_WEIGHT, TRAIN_NORM_CSV, TEST_NORM_CSV, MODELS_DIR
+
+# === 统一路径配置：所有数据/模型路径来自 config/paths.py ===
+import sys as _cfg_sys
+from pathlib import Path as _cfg_Path
+_cfg_sys.path.insert(0, str(_cfg_Path(__file__).resolve().parents[1]))
+from config.paths import (
+    MAIN_MODEL_WEIGHT, MODELS_DIR,
+    TRAIN_NORM_CSV, TEST_NORM_CSV,
+    MASK_TRAIN_CSV, MASK_TEST_CSV,
+)
 
 # 列排列方案：'v1'=元素周期表+电极电势  'v2'=亲缘矩阵+不相容性序列
+# 正式 GeoDAN 训练使用 v1，并开启显式缺失编码（双通道：数值 + 缺失mask）。
 COLUMN_ORDER_SCHEME = 'v1'
+
+# 中文注释：与 ablation_v4_vit_transformer.py 正式方案保持一致；关闭则退回单通道旧结构。
+USE_MISSING_MASK = True
 
 MODEL_PATH = str(MAIN_MODEL_WEIGHT)
 
 TRAIN_FILE  = str(TRAIN_NORM_CSV)
 TEST_FILE   = str(TEST_NORM_CSV)
+
+# 中文注释：插补前原始缺失mask；训练集为SMOTE前真实行，合成行mask补0，测试集逐行对齐。
+TRAIN_MASK_FILE = str(MASK_TRAIN_CSV)
+TEST_MASK_FILE  = str(MASK_TEST_CSV)
 
 _BASE_OUTPUT = _os.environ.get('GEODAN_OUTPUT_DIR', str(MODELS_DIR))
 OUTPUT_DIR  = _os.path.join(_BASE_OUTPUT, 'shap_analysis')
@@ -199,15 +215,19 @@ class ViT_Transformer_DualStream(nn.Module):
       融合:    vit_cls + vit_gap + seq_cls + seq_gap → MLP 分类头
     """
     def __init__(self, num_classes, input_size=6, patch_size=2,
-                 embed_dim=96, num_heads=8, transformer_layers=2,
-                 ff_dim=192, dropout=0.1):
+                 embed_dim=128, num_heads=8, transformer_layers=2,
+                 ff_dim=256, dropout=0.15, use_missing_mask=False):
         super().__init__()
         self.num_patches = (input_size // patch_size) ** 2   # 9 patches
         self.seq_len     = input_size * input_size           # 36 tokens
         self.embed_dim   = embed_dim
+        self.use_missing_mask = use_missing_mask
+        # 中文注释：开启缺失编码后，矩阵分支为“数值+mask”2通道，序列分支每元素2特征。
+        image_channels    = 2 if use_missing_mask else 1
+        sequence_features = 2 if use_missing_mask else 1
 
         # ── 矩阵分支: ViT ──
-        self.patch_embed = PatchEmbedding(1, patch_size, embed_dim, self.num_patches)
+        self.patch_embed = PatchEmbedding(image_channels, patch_size, embed_dim, self.num_patches)
         self.vit_cls     = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.vit_cls_pos = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.vit_blocks  = nn.ModuleList([
@@ -217,7 +237,7 @@ class ViT_Transformer_DualStream(nn.Module):
         self.vit_norm    = nn.LayerNorm(embed_dim)
 
         # ── 序列分支: Transformer ──
-        self.seq_proj       = nn.Linear(1, embed_dim)
+        self.seq_proj       = nn.Linear(sequence_features, embed_dim)
         self.seq_norm       = nn.LayerNorm(embed_dim)
         self.seq_cls        = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.seq_pos_embed  = nn.Parameter(torch.randn(1, self.seq_len + 1, embed_dim) * 0.02)
@@ -281,20 +301,32 @@ class ViT_Transformer_DualStream(nn.Module):
 
 class TableInputWrapper(nn.Module):
     """
-    SHAP 只接收一个 (B, 36) 的表格输入，每一列对应一个原始地化变量。
-    wrapper 内部再按训练时的两种顺序重排成 x_img 和 x_seq。
+    SHAP 接收一个 (B, F) 的表格输入，wrapper 内部重排成模型需要的双分支双通道输入。
+      - 关闭 mask: F=36，仅分位数数值；
+      - 开启 mask: F=72，前 36=数值、后 36=对应缺失mask（均按 canonical 顺序）。
+    数值与mask均按 img/seq 两种顺序重排，再分别拼成 (B,2,6,6) 与 (B,36,2)。
     """
-    def __init__(self, model, canonical_cols, img_cols, seq_cols):
+    def __init__(self, model, canonical_cols, img_cols, seq_cols, use_missing_mask=False):
         super().__init__()
         self.model = model
+        self.n_feat = len(canonical_cols)
         self.img_idx = [canonical_cols.index(c) for c in img_cols]
         self.seq_idx = [canonical_cols.index(c) for c in seq_cols]
+        self.use_missing_mask = use_missing_mask
 
-    def forward(self, x_36):
-        img_flat = x_36[:, self.img_idx]       # (B, 36)
-        seq_flat = x_36[:, self.seq_idx]       # (B, 36)
-        x_img  = img_flat.reshape(-1, 1, 6, 6)   # (B, 1, 6, 6)
-        x_seq  = seq_flat.reshape(-1, 36, 1)     # (B, 36, 1)
+    def forward(self, x):
+        n = self.n_feat
+        val = x[:, :n]
+        img_val = val[:, self.img_idx].reshape(-1, 1, 6, 6)   # (B, 1, 6, 6)
+        seq_val = val[:, self.seq_idx].reshape(-1, 36, 1)     # (B, 36, 1)
+        if self.use_missing_mask:
+            msk = x[:, n:2 * n]
+            img_msk = msk[:, self.img_idx].reshape(-1, 1, 6, 6)
+            seq_msk = msk[:, self.seq_idx].reshape(-1, 36, 1)
+            x_img = torch.cat([img_val, img_msk], dim=1)      # (B, 2, 6, 6)
+            x_seq = torch.cat([seq_val, seq_msk], dim=2)      # (B, 36, 2)
+        else:
+            x_img, x_seq = img_val, seq_val
         return self.model(x_img, x_seq)
 
 
@@ -302,8 +334,13 @@ class TableInputWrapper(nn.Module):
 # ⑤  数据加载
 # ══════════════════════════════════════════════════════════════
 
-def load_data(train_path, test_path):
-    """读取预分割的训练集与测试集，返回 36 个原始地化变量的表格输入"""
+def load_data(train_path, test_path, train_mask_path=None, test_mask_path=None):
+    """读取预分割训练/测试集；开启缺失编码时附加 36 维缺失mask。
+
+    返回的特征矩阵每行：
+      - 关闭 mask：36 维（仅分位数数值，已 /255 归一化）；
+      - 开启 mask：72 维（前 36=数值，后 36=缺失mask，均按 ALL_FEATURES_COLS 顺序）。
+    """
     for enc in ('utf-8', 'ISO-8859-1'):
         try:
             df_train = pd.read_csv(train_path, encoding=enc)
@@ -312,9 +349,9 @@ def load_data(train_path, test_path):
         except UnicodeDecodeError:
             continue
 
-    # SHAP 只看到一个 36 维表格输入；两路模型输入在 wrapper 内部生成。
-    X_train_36 = df_train[ALL_FEATURES_COLS].values.astype(np.float32) / 255.0
-    X_test_36  = df_test [ALL_FEATURES_COLS].values.astype(np.float32) / 255.0
+    # 数值通道：分位数编码值 /255。两路模型输入在 wrapper 内部生成。
+    X_train_val = df_train[ALL_FEATURES_COLS].values.astype(np.float32) / 255.0
+    X_test_val  = df_test [ALL_FEATURES_COLS].values.astype(np.float32) / 255.0
 
     # 标签编码（以训练集顺序为准）
     y_train_raw, unique = pd.factorize(df_train['TECTONIC SETTING'])
@@ -328,11 +365,48 @@ def load_data(train_path, test_path):
     y_train = y_train_raw.astype(np.int64)
     y_test  = y_test_raw.astype(np.int64)
 
+    if USE_MISSING_MASK:
+        if not train_mask_path or not test_mask_path:
+            raise ValueError('启用缺失编码时必须提供训练集和测试集mask路径')
+        mask_cols = [f'missing_mask__{c}' for c in ALL_FEATURES_COLS]
+        m_train = pd.read_csv(train_mask_path, encoding='utf-8-sig')
+        m_test  = pd.read_csv(test_mask_path,  encoding='utf-8-sig')
+        missing = [c for c in mask_cols
+                   if c not in m_train.columns or c not in m_test.columns]
+        if missing:
+            raise ValueError(f'缺失mask文件缺少列(示例): {missing[:5]}')
+
+        train_mask = m_train[mask_cols].values.astype(np.float32)
+        test_mask  = m_test [mask_cols].values.astype(np.float32)
+
+        # 中文注释：SMOTE合成训练行排在真实mask之后，统一补0，与训练脚本一致。
+        n_syn = len(df_train) - len(train_mask)
+        if n_syn < 0:
+            raise ValueError('训练mask行数大于训练集行数，请检查文件版本')
+        if n_syn > 0:
+            train_mask = np.concatenate(
+                [train_mask,
+                 np.zeros((n_syn, len(ALL_FEATURES_COLS)), np.float32)],
+                axis=0,
+            )
+        if len(test_mask) != len(X_test_val):
+            raise ValueError(
+                f'测试mask行数不一致: {len(test_mask)} != {len(X_test_val)}')
+
+        X_train = np.concatenate([X_train_val, train_mask], axis=1)   # (Ntr, 72)
+        X_test  = np.concatenate([X_test_val,  test_mask],  axis=1)   # (Nte, 72)
+        print(f'  缺失编码: 开启 | 真实训练mask行={len(m_train)}，'
+              f'SMOTE补0行={n_syn}')
+    else:
+        X_train, X_test = X_train_val, X_test_val
+        print('  缺失编码: 关闭（单通道）')
+
     print(f'\n数据加载完成')
-    print(f'  训练集: {len(y_train)}  测试集: {len(y_test)}')
+    print(f'  训练集: {len(y_train)}  测试集: {len(y_test)}  '
+          f'特征维度: {X_train.shape[1]}')
     print(f'  类别 ({len(unique)}): {list(unique)}')
 
-    return X_train_36, y_train, X_test_36, y_test, unique
+    return X_train, y_train, X_test, y_test, unique
 
 
 # ══════════════════════════════════════════════════════════════
@@ -359,16 +433,16 @@ def select_background(X_36, y, n_bg):
 # ⑦  核心：分批计算 SHAP 值
 # ══════════════════════════════════════════════════════════════
 
-def _as_class_list(shap_values):
-    """统一不同 SHAP 版本的输出格式：list[n_classes]，每项 shape=(n, 36)。"""
+def _as_class_list(shap_values, n_features):
+    """统一不同 SHAP 版本的输出格式：list[n_classes]，每项 shape=(n, n_features)。"""
     if isinstance(shap_values, list):
         return [np.asarray(v) for v in shap_values]
 
     arr = np.asarray(shap_values)
-    if arr.ndim == 3 and arr.shape[1] == len(ALL_FEATURES_COLS):
+    if arr.ndim == 3 and arr.shape[1] == n_features:
         # 常见新格式: (n_samples, n_features, n_outputs)
         return [arr[:, :, c] for c in range(arr.shape[2])]
-    if arr.ndim == 3 and arr.shape[2] == len(ALL_FEATURES_COLS):
+    if arr.ndim == 3 and arr.shape[2] == n_features:
         # 兼容格式: (n_outputs, n_samples, n_features)
         return [arr[c, :, :] for c in range(arr.shape[0])]
     if arr.ndim == 2:
@@ -389,15 +463,16 @@ def compute_shap_values(wrapped_model, background_tensor,
 
     X_to_explain = X_36[:n_explain]
     n = len(X_to_explain)
+    n_features = X_to_explain.shape[1]
     n_batches = int(np.ceil(n / batch_size))
 
-    all_batches = []  # list of list[n_classes] arrays shaped (batch, 36)
+    all_batches = []  # list of list[n_classes] arrays shaped (batch, n_features)
 
     for i in tqdm(range(n_batches), desc='计算 SHAP 值'):
         s = i * batch_size
         e = min((i + 1) * batch_size, n)
         batch_tensor = torch.FloatTensor(X_to_explain[s:e]).to(device)
-        sv = _as_class_list(explainer.shap_values(batch_tensor))
+        sv = _as_class_list(explainer.shap_values(batch_tensor), n_features)
         all_batches.append(sv)
 
     # 按类别拼接所有 batch
@@ -783,31 +858,36 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # ---------- 1. 加载数据 ----------
-    X_train_36, y_train, X_test_36, y_test, unique_labels = load_data(TRAIN_FILE, TEST_FILE)
+    X_train, y_train, X_test, y_test, unique_labels = load_data(
+        TRAIN_FILE, TEST_FILE, TRAIN_MASK_FILE, TEST_MASK_FILE)
 
     num_classes = len(unique_labels)
 
     # ---------- 2. 加载模型 ----------
-    model = ViT_Transformer_DualStream(num_classes=num_classes).to(device)
+    model = ViT_Transformer_DualStream(
+        num_classes=num_classes,
+        use_missing_mask=USE_MISSING_MASK,
+    ).to(device)
 
     state_dict = torch.load(MODEL_PATH, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
     print(f'\n模型权重加载成功：{MODEL_PATH}')
 
-    # ---------- 3. 包装为 36 维表格输入 ----------
+    # ---------- 3. 包装为表格输入（开启mask时为 72 维）----------
     wrapped = TableInputWrapper(
         model,
         canonical_cols=ALL_FEATURES_COLS,
         img_cols=COLUMNS_IMG_ORDER,
         seq_cols=COLUMNS_ELECTRODE_ORDER,
+        use_missing_mask=USE_MISSING_MASK,
     ).to(device)
     wrapped.eval()
 
     # ---------- 4. 准备背景数据 ----------
     print(f'\n准备背景数据（分层采样 {MAX_BACKGROUND} 个样本）...')
-    background_tensor = select_background(X_train_36, y_train, MAX_BACKGROUND)
-    print(f'  背景数据 shape: {background_tensor.shape}')   # (n_bg, 36)
+    background_tensor = select_background(X_train, y_train, MAX_BACKGROUND)
+    print(f'  背景数据 shape: {background_tensor.shape}')   # (n_bg, F)
 
     # ---------- 5. 选择待解释的测试样本 ----------
     n_explain = min(MAX_EXPLAIN, len(y_test))
@@ -819,22 +899,31 @@ def main():
         n_lbl = min(n_lbl, len(lbl_idx))
         explain_idx.extend(np.random.choice(lbl_idx, n_lbl, replace=False))
     explain_idx = explain_idx[:n_explain]
-    X_exp_36 = X_test_36[explain_idx]
+    X_exp = X_test[explain_idx]
     print(f'\n待解释样本：{len(explain_idx)} 个（来自测试集）')
 
     # ---------- 6. 计算 SHAP 值 ----------
     shap_values = compute_shap_values(
         wrapped, background_tensor,
-        X_exp_36,
+        X_exp,
         n_explain=len(explain_idx),
         batch_size=SHAP_BATCH_SIZE,
     )
 
     # ---------- 7. 整理 SHAP ----------
-    merged_shap = np.array(shap_values)   # (n_classes, n_samples, 36)
+    # 开启mask时 SHAP 维度为 72=[数值|mask]，绘图只取数值通道的 36 维归因；
+    # mask 通道归因一并存入 npy，便于单独分析“缺失标记”的影响。
+    merged_full = np.array(shap_values)   # (n_classes, n_samples, F)
+    n_feat = len(ALL_FEATURES_COLS)
+    if merged_full.shape[2] == 2 * n_feat:
+        merged_shap = merged_full[:, :, :n_feat]   # 数值通道归因
+        X_exp_feat  = X_exp[:, :n_feat]            # 数值，用于 beeswarm 上色
+    else:
+        merged_shap = merged_full
+        X_exp_feat  = X_exp
 
-    np.save(os.path.join(OUTPUT_DIR, 'shap_merged.npy'),  merged_shap)
-    print(f'  SHAP numpy 数据已保存至 {OUTPUT_DIR}')
+    np.save(os.path.join(OUTPUT_DIR, 'shap_merged.npy'),  merged_full)
+    print(f'  SHAP numpy 数据已保存至 {OUTPUT_DIR}（含mask通道，shape={merged_full.shape}）')
 
     # ---------- 8. 绘图 ----------
     print('\n开始绘图...')
@@ -843,11 +932,11 @@ def main():
     plot_stacked_bar(merged_shap, unique_labels, OUTPUT_DIR)
 
     # 8b. 整体 beeswarm
-    plot_overall_beeswarm(merged_shap, X_exp_36, OUTPUT_DIR)
+    plot_overall_beeswarm(merged_shap, X_exp_feat, OUTPUT_DIR)
 
     # 8c. 每类 beeswarm（可能较慢）
     print('\n绘制各构造环境 beeswarm 图...')
-    plot_per_class_beeswarm(merged_shap, X_exp_36, unique_labels, OUTPUT_DIR)
+    plot_per_class_beeswarm(merged_shap, X_exp_feat, unique_labels, OUTPUT_DIR)
 
     # 8d. 热力图
     plot_heatmap(merged_shap, unique_labels, OUTPUT_DIR)

@@ -49,7 +49,7 @@
         "y": 100
       },
       "params": {
-        "content": "输出目录：\n{repo_root}\\data\\models\\kfold\\\n\n主要结果：\n- fold_1 至 fold_5：各折、各种子的模型权重\n- kfold_per_run_results.csv：5折×2种子的逐次结果\n- kfold_summary.csv：全部10次结果的均值和标准差"
+        "content": "输出目录：\n{repo_root}\\data\\models\\kfold\\\n\n主要结果：\n- fold_1 至 fold_5：各折、各种子的模型权重\n- kfold_per_run_results.csv：5折×2种子的逐次结果\n- kfold_summary.csv：全部10次结果的均值和标准差\n- logs\\kfold_training_YYYYMMDD_HHMMSS.log：每次运行单独创建的实时日志"
       }
     }
   ],
