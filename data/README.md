@@ -1,12 +1,27 @@
 # 数据说明（Data Availability）
 
-> **重要**：本目录下的数据文件体量较大（合计约 400 MB，单文件最大 ~78 MB），
-> **默认不纳入 Git 版本库**（见根目录 `.gitignore`）。正式发表时，完整数据集将
-> 通过 **Zenodo / figshare** 永久存档并分配 DOI；克隆仓库后，请从该存档下载数据
-> 并按下方目录结构放置，即可运行全部脚本。
+> **重要**：本目录（`data/`）**默认不纳入 Git 版本库**（见根目录 `.gitignore`，
+> 仅保留本 `README.md` 与各阶段空目录占位）。克隆仓库后 `data/` 基本为空，
+> **必须先从 Zenodo 下载数据再运行脚本**。
 >
-> - **Zenodo DOI**：`<待发表后填写，占位>`
-> - **下载地址**：`<占位>`
+> - **数据 DOI**：[10.5281/zenodo.20736587](https://doi.org/10.5281/zenodo.20736587)
+
+## 从 Zenodo 获取数据
+
+Zenodo 存档为一份**精简数据发布**（`basalt_geochemistry_dataset`），只含三张关键表，
+**不含**训练流程的中间产物（切分集、插补表、SMOTE 结果、1–255 编码表等）——这些由
+脚本按 [../docs/workflow.md](../docs/workflow.md) 重新生成。下载后请按下表放置：
+
+| Zenodo 文件 | 行数 × 列数 | 放置到（仓库内路径） | 流程角色 |
+|---|---|---|---|
+| `modern_basalt_geochemistry.csv` | 30,547 × 43 | `03_combined/01_basalt_number_year.csv` | 现代玄武岩合并总表（GeoROC+PetDB 清洗合并；流程③切分的输入） |
+| `archean_basalt_geochemistry.csv` | 3,483 × 57 | `archean/outputs/extended_archean_pool/expanded_archean_basalt_age_nonmissing.csv` | 太古代候选池（缺失值保留，不做现代插补） |
+| `archean_basalt_geodan_predictions.csv` | 3,012 × 87 | `archean/outputs/archean_geodan_final/expanded_archean_predictions.csv` | 正式 GeoDAN 预测结果（无水 SiO2=44–53 wt%、MgO≤18 wt% 子集） |
+
+放置后即可从**流程③（训练/测试切分）**起跑通现代主线，并直接复现太古代预测与下游图件。
+精简发布**不含**原始 GEOROC/PetDB 表、汇聚边缘细分产出、Liu 原始太古代表（`archean/data/`）
+与模型权重（`models/*.pth`），因此从最原始数据起步的步骤（筛选①、候选池构建 10a 等）
+需另行准备上游输入或向作者索取。
 
 ---
 
@@ -65,11 +80,13 @@ data/
 │   └── Full_Model_(ViT+Transformer)_best_seed.pth   主模型权重（SHAP / 太古代预测加载）
 │
 └── archean/                        # 太古代应用（缺失编码：不插补，数值 0 + mask 1）
-    ├── data/                       Liu 2024 全球数据 + 6 克拉通案例 CSV/XLSX/ZIP
+    ├── data/                       Liu 2024 全球数据 + 6 克拉通案例 CSV（Isua / Pilbara /
+    │                               Ivisaartoq / Norseman_Kambalda / Superior_Abitibi / North_China_Craton）
     └── outputs/                    （脚本运行时生成）
-        ├── extended_archean_pool/  扩展应用集（正式 3,483 条：expanded_archean_basalt_age_nonmissing.csv）
-        ├── archean_geodan_final/   正式缺失编码预测（expanded_archean_predictions.csv 等）
-        └── distribution_consistency/  适用域 / 域偏移诊断
+        ├── extended_archean_pool/  候选池 3,483 条（SiO2≤54，expanded_archean_basalt_age_nonmissing.csv）
+        ├── archean_geodan_final/   正式缺失编码预测（筛 SiO2≤53 得 3,012 条；含 Figure 9 重设计图）
+        ├── archean_case_studies/   6 克拉通案例预处理 / 预测 / 组成与山脊图
+        └── distribution_consistency/  适用域 / 域偏移 / 分布一致性诊断
 ```
 
 ---

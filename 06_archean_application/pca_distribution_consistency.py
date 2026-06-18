@@ -1,22 +1,15 @@
 """
-现代训练集 vs 太古代应用集的 PCA 分布一致性分析。
+CFB=6920、缺失编码GeoDAN最终方案的现代训练集与太古代应用集PCA分析。
 
 数据流：
-- 现代玄武岩：直接使用原始 CSV。
-- 太古代玄武岩：直接使用原始 CSV，不做 MissForest 插值，也不读取插值缓存。
+- 现代玄武岩：读取训练集插补后、主量无水标准化后的连续数据。
+- 太古代玄武岩：从3483条年龄非空候选样品按无水SiO2 44-53 wt%
+  和MgO不大于18 wt%筛选为3012条，不执行地球化学插补。
+- PCA 不使用 1-255 分位数分箱值，保留真实地球化学含量关系。
 - PCA 轴只用现代训练集拟合；太古代样品只投影到固定 PCA 空间。
 """
 
 from __future__ import annotations
-
-# === ?????????? config/paths.py????????????===
-import sys as _cfg_sys
-from pathlib import Path as _cfg_Path
-_cfg_sys.path.insert(0, str(_cfg_Path(__file__).resolve().parents[1]))
-from config.paths import (
-    ARCHEAN_DIR, TRAIN_NORM_CSV, TEST_NORM_CSV,
-    MAIN_MODEL_WEIGHT, QUANTILE_PARAMS_JSON, COMBINED_CSV,
-)
 
 import warnings
 from pathlib import Path
@@ -32,26 +25,27 @@ from matplotlib.patches import Ellipse
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 
+# === 统一路径配置：所有数据路径来自 config/paths.py ===
+import sys as _cfg_sys
+_cfg_sys.path.insert(0, str(Path(__file__).resolve().parent))
+_cfg_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config.paths import (
+    TRAIN_MAJOR_NORM_CSV, ARCHEAN_POOL_CSV,
+    ARCHEAN_FINAL_PREDICTIONS_CSV, ARCHEAN_CONSISTENCY_DIR,
+)
+
+from archean_s3_preprocess import preprocess_archean
+
 
 # =========================
-# 路径
+# 路径（输出文件名在各自 save 处用 OUT_ROOT / "文件名" 构造）
 # =========================
-RAW_MODERN_PATH = COMBINED_CSV
-ARCHEAN_RAW_PATH = (ARCHEAN_DIR / "data/archean_basalt.csv")
-OUT_ROOT = (ARCHEAN_DIR / "outputs/distribution_consistency")
-OUT_NO_IMPUTE = (ARCHEAN_DIR / "outputs/distribution_consistency/pca_no_impute")
+RAW_MODERN_PATH = Path(str(TRAIN_MAJOR_NORM_CSV))
+ARCHEAN_RAW_PATH = Path(str(ARCHEAN_POOL_CSV))
+FINAL_PREDICTION_PATH = Path(str(ARCHEAN_FINAL_PREDICTIONS_CSV))
+OUT_ROOT = Path(str(ARCHEAN_CONSISTENCY_DIR))
 
-# 中文注释：新的 applicability-domain 三联图直接输出到 distribution_consistency 根目录。
-AD_FIG_PNG = OUT_ROOT / "pca_applicability_domain.png"
-AD_COMPAT_PNG = OUT_ROOT / "pca_v1_overall.png"          # 中文注释：兼容旧文件名，输出同一张三联图。
-AD_COVERAGE_CSV = OUT_ROOT / "pca_applicability_coverage.csv"
-
-# 中文注释：保留旧的逐类版 PCA 及统计文件（仍写到 pca_no_impute 子目录，不影响新图）。
-PCA_OVERALL_PATH = (ARCHEAN_DIR / "outputs/distribution_consistency/pca_no_impute/pca_v1_overall.png")
-PCA_PER_CLASS_PATH = (ARCHEAN_DIR / "outputs/distribution_consistency/pca_no_impute/pca_v2_per_class.png")
-PCA_OVERLAP_SUMMARY_PATH = (ARCHEAN_DIR / "outputs/distribution_consistency/pca_no_impute/pca_overlap_summary.csv")
-PCA_COORDS_PATH = (ARCHEAN_DIR / "outputs/distribution_consistency/pca_no_impute/pca_coords.npz")
-PCA_LOADINGS_PATH = (ARCHEAN_DIR / "outputs/distribution_consistency/pca_no_impute/pca_loadings.csv")
+CFB_TARGET_COUNT = 6920
 
 
 # =========================
@@ -64,9 +58,9 @@ TRACES = ["RB", "V", "CR", "CO", "NI", "BA", "SR", "Y", "ZR", "NB",
 ALL_ELEMENTS = MAJORS + TRACES
 
 TECTONIC_COL = "TECTONIC SETTING"
-CONFIDENCE_COL = "Arc_probability3"
-HIGH_CONF_THRESHOLD = 0.60   # 中文注释：高弧亲和性阈值 P_arc >= 0.60。
+HIGH_CONF_THRESHOLD = 0.50   # 中文注释：高弧亲和性阈值 P_arc >= 0.50。
 LOW_CONF_THRESHOLD = 0.30    # 中文注释：低弧亲和性阈值 P_arc < 0.30。
+GEODAN_ARC_LABELS = ["Continental arc", "Island arc", "Intra-oceanic arc"]
 RANDOM_SEED = 42
 CHI2_95_DF2 = 5.991464547107979
 CHI2_99_DF2 = 9.210340371976294
@@ -81,27 +75,20 @@ AD_K = 10              # kNN 的 k 值。
 ENV_VIS_SCALE = 0.75
 
 # =========================
-# 太古代数据预处理：完整度 + 玄武岩主量筛选
-# =========================
-ARCH_MAX_MISSING = 16            # 36 个元素里缺失（NaN 或 <=0）多于 16 个的样品剔除。
-ARCH_SIO2_RANGE = (45.0, 53.0)   # 玄武岩主量窗口（WT%）。
-ARCH_MGO_RANGE = (4.5, 12.0)
-ARCH_AL2O3_RANGE = (12.0, 19.0)
-
-# =========================
 # applicability-domain 三联图配色（低饱和，期刊主文风格）
 # =========================
 # (a) PCA reference space
-C_MODERN_FILL = "#E3E7EA"   # 现代参考背景极浅灰
-C_ARCHEAN = "#5F6F7A"       # 太古代蓝灰
-C_HIGH_ARC = "#C85A17"      # 高弧亲和性低饱和橙
-C_ENV_95 = "#5E666D"        # 95% envelope 深灰
-C_ENV_99 = "#747D84"        # 99% envelope 稍浅灰
+C_MODERN_FILL = "#A7B2BA"   # 现代参考点云中浅灰（够深才看得清）
+C_ARCHEAN = "#4A6C88"       # 太古代钢蓝（比原灰蓝更明显）
+C_HIGH_ARC = "#DA3327"      # 高弧亲和性正红
+C_ENV_95 = "#36586A"        # 95% envelope 深岩蓝
+C_ENV_99 = "#5C7E90"        # 99% envelope 稍浅岩蓝
 # (b) applicability-domain distance
 C_MODERN_OUTLINE = "#4C555C"  # 现代参考距离 step 轮廓
-C_IN_DOMAIN = "#6F8EA3"     # ≤95% 蓝灰
-C_MARGINAL = "#E7B36A"      # 95–99% 柔和浅橙
-C_OUT_DOMAIN = "#D98686"    # >99% 柔和玫瑰红
+# 中文注释：三段按「距现代域越来越远」做感知有序渐变 蓝(域内)→琥珀(边缘)→红(越界)。
+C_IN_DOMAIN = "#3F7CA3"     # ≤95% 域内 蓝
+C_MARGINAL = "#E2A33C"      # 95–99% 边缘 琥珀
+C_OUT_DOMAIN = "#B5483E"    # >99% 越界 砖红
 C_THRESH = "#30343A"        # 阈值竖线
 # (c) quantitative coverage
 C_CONNECT = "#B8C0C7"       # dumbbell 连线
@@ -152,42 +139,11 @@ def extract_elements(df: pd.DataFrame) -> pd.DataFrame:
     return out[ALL_ELEMENTS]
 
 
-def preprocess_archean(df: pd.DataFrame) -> pd.DataFrame:
-    """太古代玄武岩预处理：① 剔除高缺失样品；② 按主量元素范围做玄武岩筛选。
-
-    - 缺失计数：36 个元素里 NaN 或 <=0 的个数（与 to_pca_space 对缺失的处理一致）。
-    - 主量窗口：SiO2 / MgO / Al2O3 同时落在给定范围（含边界）。
-    返回过滤并 reset_index 后的 df，保留原始列，供后续抽取置信度与元素特征（行索引保持同步）。
-    """
-    n0 = len(df)
-    feats = extract_elements(df)
-    miss = (feats.isna() | (feats <= 0)).sum(axis=1)
-    df1 = df[miss <= ARCH_MAX_MISSING]
-    n1 = len(df1)
-
-    sio2 = pd.to_numeric(df1["SIO2"], errors="coerce")
-    mgo = pd.to_numeric(df1["MGO"], errors="coerce")
-    al2o3 = pd.to_numeric(df1["AL2O3"], errors="coerce")
-    keep_major = (sio2.between(*ARCH_SIO2_RANGE)
-                  & mgo.between(*ARCH_MGO_RANGE)
-                  & al2o3.between(*ARCH_AL2O3_RANGE))
-    df2 = df1[keep_major].reset_index(drop=True)
-    n2 = len(df2)
-
-    print("  Archean preprocessing:")
-    print(f"    missing <= {ARCH_MAX_MISSING} / {len(ALL_ELEMENTS)}      : "
-          f"{n1:,} / {n0:,}  (removed {n0 - n1:,})")
-    print(f"    SiO2{ARCH_SIO2_RANGE} MgO{ARCH_MGO_RANGE} Al2O3{ARCH_AL2O3_RANGE}: "
-          f"{n2:,} / {n1:,}  (removed {n1 - n2:,})")
-    print(f"    kept {n2:,} / {n0:,} archean samples")
-    return df2
-
-
 # =========================
 # PCA 输入构造
 # =========================
 def to_pca_space(train: pd.DataFrame, arch: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """把原始现代/太古代特征转到 log10 + 现代训练集标准化空间，不做插值。"""
+    """把无水标准化后的现代/太古代特征转到 log10 + 现代训练集标准化空间，不做插值。"""
     # 中文注释：0 和负值视为缺失；用现代训练集 nanmean/nanstd 标准化。
     # 中文注释：缺失值填到标准化空间的 0，也就是现代训练集均值位置。
     tr, ar = train.copy(), arch.copy()
@@ -274,16 +230,17 @@ def confidence_ellipse(x, y, ax, n_std=2.0, **kwargs):
     return ax.add_patch(ellipse)
 
 
-def _panel_tag(ax, tag: str, x_pts: float = -40, y_pts: float = 12) -> None:
+def _panel_tag(ax, tag: str, x_pts: float = -52, y_pts: float = -12) -> None:
     """子图左上角外侧加粗标注 (a)/(b)/(c)。
 
     用「相对轴左上角的固定点数偏移」定位，与面板宽高无关——这样不同高度/宽度的子图
     标号离各自顶边、左边的绝对距离一致（顶边对齐的 (a)/(b) 标号高度相同）。
+    中文注释：子图标题移除后，将编号收近到绘图区，减少顶部和左侧的无效留白。
     x_pts 越负越靠左，y_pts 越大越靠上。
     """
     ax.annotate(tag, xy=(0, 1), xycoords="axes fraction",
                 xytext=(x_pts, y_pts), textcoords="offset points",
-                ha="left", va="bottom", fontsize=13, fontweight="bold", color=C_TEXT)
+                ha="left", va="bottom", fontsize=14, fontweight="bold", color=C_TEXT)
 
 
 def _style_axes(ax) -> None:
@@ -297,11 +254,11 @@ def _style_axes(ax) -> None:
 
 
 def _panel_a_map(ax, PC_train, PC_arch, high_mask, ad, var1, var2):
-    """(a) Modern basalt reference space：极淡现代参考云 + 95/99 置信椭圆 envelope + 太古代叠加。"""
+    """(a) Modern basalt reference space：现代参考点云 + 95/99 置信椭圆 envelope + 太古代叠加。"""
     xt, yt = PC_train[:, 0], PC_train[:, 1]
 
-    # 中文注释：所有现代玄武岩合并成极淡浅灰参考云，点径小、透明度低，不压住太古代点。
-    ax.scatter(xt, yt, s=6, c=C_MODERN_FILL, alpha=0.13, edgecolors="none", zorder=1)
+    # 中文注释：所有现代玄武岩合并成中浅灰参考云，点径小、透明度适中，看得清又不压住太古代点。
+    ax.scatter(xt, yt, s=6, c=C_MODERN_FILL, alpha=0.20, edgecolors="none", zorder=1)
 
     # 中文注释：现代训练域 95%（实线）/ 99%（长虚线）置信椭圆 envelope，低饱和细线、点在其上。
     confidence_ellipse(xt, yt, ax, n_std=ELLIPSE_99_SCALE, edgecolor=C_ENV_99,
@@ -309,19 +266,20 @@ def _panel_a_map(ax, PC_train, PC_arch, high_mask, ad, var1, var2):
     confidence_ellipse(xt, yt, ax, n_std=ELLIPSE_95_SCALE, edgecolor=C_ENV_95,
                        facecolor="none", lw=1.2, alpha=0.85, zorder=3)
 
-    # 中文注释：太古代样品；高弧亲和性单独低饱和橙高亮，其余蓝灰点。
+    # 中文注释：太古代样品；每颗点加极细白描边，让重叠点彼此分离、产生层次/立体感。
+    #          高弧亲和性单独正红高亮、点更大白边更粗，浮在最上层。
     if high_mask is not None:
-        ax.scatter(PC_arch[~high_mask, 0], PC_arch[~high_mask, 1], s=18, c=C_ARCHEAN,
-                   alpha=0.60, edgecolors="none", zorder=4, label="Archean")
-        ax.scatter(PC_arch[high_mask, 0], PC_arch[high_mask, 1], s=26, c=C_HIGH_ARC,
-                   alpha=0.80, edgecolors="white", linewidths=0.4, zorder=6,
+        ax.scatter(PC_arch[~high_mask, 0], PC_arch[~high_mask, 1], s=17, c=C_ARCHEAN,
+                   alpha=0.80, edgecolors="white", linewidths=0.35, zorder=4, label="Archean")
+        ax.scatter(PC_arch[high_mask, 0], PC_arch[high_mask, 1], s=30, c=C_HIGH_ARC,
+                   alpha=0.92, edgecolors="white", linewidths=0.55, zorder=6,
                    label="High arc-affinity")
     else:
-        ax.scatter(PC_arch[:, 0], PC_arch[:, 1], s=18, c=C_ARCHEAN,
-                   alpha=0.60, edgecolors="none", zorder=4, label="Archean")
+        ax.scatter(PC_arch[:, 0], PC_arch[:, 1], s=17, c=C_ARCHEAN,
+                   alpha=0.80, edgecolors="white", linewidths=0.35, zorder=4, label="Archean")
 
-    ax.text(0.025, 0.97, "Modern basalt reference space", transform=ax.transAxes,
-            ha="left", va="top", fontsize=11.5, style="italic", color=C_TEXT)
+    # ax.text(0.025, 0.97, "Modern basalt reference space", transform=ax.transAxes,
+    #         ha="left", va="top", fontsize=11.5, style="italic", color=C_TEXT)
     ax.set_xlabel(f"PC1 (modern-reference PCA; {var1 * 100:.1f}% variance)")
     ax.set_ylabel(f"PC2 ({var2 * 100:.1f}% variance)")
 
@@ -341,7 +299,7 @@ def _panel_a_map(ax, PC_train, PC_arch, high_mask, ad, var1, var2):
 
     handles = [
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_MODERN_FILL,
-               markeredgecolor="#C4CACE", markersize=6, label="Modern reference"),
+               markeredgecolor="#8C969D", markersize=6, label="Modern reference"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_ARCHEAN,
                markeredgecolor="none", markersize=6, label="Archean"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_HIGH_ARC,
@@ -402,7 +360,7 @@ def _panel_b_distance(ax, ad):
     ax.set_xlim(0, xmax)
     ax.set_xlabel("kNN distance to modern reference")
     ax.set_ylabel("Density")
-    ax.set_title("Applicability-domain distance", fontsize=11, pad=6, color=C_TEXT)
+    # ax.set_title("Applicability-domain distance", fontsize=11, pad=6, color=C_TEXT)
     ax.grid(True, axis="y", color=C_GRID, lw=0.6, alpha=0.7, zorder=0)
     ax.set_axisbelow(True)
     _style_axes(ax)
@@ -431,11 +389,14 @@ def _panel_c_coverage(ax, cov_rows):
                 ha="left", va="top", fontsize=8.5, color=C_NLABEL)
 
     all_vals = [v for r in cov_rows for v in (r["cov95"], r["cov99"])]
-    lo = 45 if min(all_vals) >= 50 else 40
-    ax.set_xlim(lo, 100)
+    # 中文注释：覆盖率点及其左右数值标签都必须位于坐标范围内，动态预留边距。
+    x_margin = 6.0
+    x_min = max(0.0, np.floor((min(all_vals) - x_margin) / 5.0) * 5.0)
+    x_max = min(105.0, np.ceil((max(all_vals) + x_margin) / 5.0) * 5.0)
+    ax.set_xlim(x_min, x_max)
     ax.set_ylim(-0.6, n - 0.05)
     ax.set_xlabel("Coverage within modern domain (%)")
-    ax.set_title("Quantitative coverage", fontsize=11, pad=6, color=C_TEXT)
+    # ax.set_title("Quantitative coverage", fontsize=11, pad=6, color=C_TEXT)
     ax.grid(True, axis="x", color=C_GRID, lw=0.6, alpha=0.7, zorder=0)
     ax.set_axisbelow(True)
     _style_axes(ax)
@@ -549,7 +510,8 @@ def plot_per_class(PC_train, PC_arch, labels, classes, colors, high_mask,
 # =========================
 # 椭圆内占比统计
 # =========================
-def compute_overlap(PC_train, PC_arch, labels, classes, high_mask) -> pd.DataFrame:
+def compute_overlap(PC_train, PC_arch, labels, classes,
+                    high_mask, low_mask) -> pd.DataFrame:
     rows = []
     for cls in classes:
         m = labels == cls
@@ -572,8 +534,10 @@ def compute_overlap(PC_train, PC_arch, labels, classes, high_mask) -> pd.DataFra
         if high_mask is not None:
             row["archean_inside_high_n"] = int((inside & high_mask).sum())
             row["archean_inside_high_pct"] = round(100 * (inside & high_mask).sum() / high_mask.sum(), 2)
-            row["archean_inside_low_n"] = int((inside & ~high_mask).sum())
-            row["archean_inside_low_pct"] = round(100 * (inside & ~high_mask).sum() / (~high_mask).sum(), 2)
+        if low_mask is not None:
+            # 中文注释：低弧组严格使用 P_arc < 0.30，不把中间概率样品混入低弧统计。
+            row["archean_inside_low_n"] = int((inside & low_mask).sum())
+            row["archean_inside_low_pct"] = round(100 * (inside & low_mask).sum() / low_mask.sum(), 2)
         rows.append(row)
     return pd.DataFrame(rows).sort_values("modern_n", ascending=False)
 
@@ -581,13 +545,17 @@ def compute_overlap(PC_train, PC_arch, labels, classes, high_mask) -> pd.DataFra
 # =========================
 # 无插值版本主流程
 # =========================
-def run_no_impute(train_feats: pd.DataFrame, arch_feats: pd.DataFrame,
-                  labels: np.ndarray, classes: list[str], colors: dict,
-                  high_mask: np.ndarray | None, low_mask: np.ndarray | None,
-                  arch_conf: np.ndarray | None) -> dict:
+def run_continuous_pca(train_feats: pd.DataFrame, arch_feats: pd.DataFrame,
+                       labels: np.ndarray, classes: list[str], colors: dict,
+                       high_mask: np.ndarray | None, low_mask: np.ndarray | None,
+                       arch_conf: np.ndarray | None) -> dict:
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
-    OUT_NO_IMPUTE.mkdir(parents=True, exist_ok=True)
-    print(f"\n{'=' * 80}\nVariant: no_impute\nOutput : {OUT_ROOT}\nMode   : no_impute")
+    print(
+        f"\n{'=' * 80}\n"
+        "Variant: cfb6920_missing_mask\n"
+        f"Output : {OUT_ROOT}\n"
+        "Mode   : continuous geochemical values"
+    )
 
     # 中文注释：拟合完整 PCA；前 2 个 PC 用于 (a) 散点，前若干个 PC（~85% 方差）用于 kNN 距离。
     X_train, X_arch = to_pca_space(train_feats, arch_feats)
@@ -607,10 +575,12 @@ def run_no_impute(train_feats: pd.DataFrame, arch_feats: pd.DataFrame,
     for r in cov_rows:
         print(f"    {r['group'].splitlines()[0]:24s} n={r['n']:5d}  cov95={r['cov95']:5.1f}  cov99={r['cov99']:5.1f}")
 
+    # 中文注释：三联图同时输出新文件名和兼容旧文件名两份。
     print("  Plotting applicability-domain triptych ...")
     plot_applicability_domain(PC_train, PC_arch, high_mask, ad, cov_rows,
                               var1, var2,
-                              paths=[AD_FIG_PNG, AD_COMPAT_PNG])
+                              paths=[OUT_ROOT / "pca_applicability_domain.png",
+                                     OUT_ROOT / "pca_v1_overall.png"])
 
     cov_df = pd.DataFrame([{**{k: v for k, v in r.items() if k != "group"},
                             "group": r["group"].replace("\n", " ")} for r in cov_rows])
@@ -618,20 +588,20 @@ def run_no_impute(train_feats: pd.DataFrame, arch_feats: pd.DataFrame,
     cov_df.insert(0, "n_pc", ad["n_pc"])
     cov_df["q95_dist"] = round(ad["q95"], 4)
     cov_df["q99_dist"] = round(ad["q99"], 4)
-    cov_df.to_csv(AD_COVERAGE_CSV, index=False)
-    print(f"    Saved: {AD_COVERAGE_CSV}")
+    coverage_csv = OUT_ROOT / "pca_applicability_coverage.csv"
+    cov_df.to_csv(coverage_csv, index=False)
+    print(f"    Saved: {coverage_csv}")
 
-    # 中文注释：保留旧版逐类 PCA 面板与椭圆占比统计（写到 pca_no_impute 子目录）。
     print("  Plotting per-class panels ...")
     plot_per_class(PC_train, PC_arch, labels, classes, colors, high_mask,
-                   var1, var2, "no_impute", PCA_PER_CLASS_PATH)
+                   var1, var2, "cfb6920_missing_mask", OUT_ROOT / "pca_v2_per_class.png")
 
     print("  Computing ellipse overlap ...")
-    summary = compute_overlap(PC_train, PC_arch, labels, classes, high_mask)
-    summary.to_csv(PCA_OVERLAP_SUMMARY_PATH, index=False)
+    summary = compute_overlap(PC_train, PC_arch, labels, classes, high_mask, low_mask)
+    summary.to_csv(OUT_ROOT / "pca_overlap_summary.csv", index=False)
     print(summary.to_string(index=False))
 
-    np.savez(PCA_COORDS_PATH,
+    np.savez(OUT_ROOT / "pca_coords.npz",
              PC_train=PC_train, PC_arch=PC_arch, train_labels=labels,
              arch_conf=arch_conf if arch_conf is not None else np.array([]),
              dist_modern=ad["dist_modern"], dist_arch=ad["dist_arch"],
@@ -641,11 +611,11 @@ def run_no_impute(train_feats: pd.DataFrame, arch_feats: pd.DataFrame,
 
     loadings = pd.DataFrame(pca.components_[:2].T, columns=["PC1_loading", "PC2_loading"], index=ALL_ELEMENTS)
     loadings["PC1_abs"], loadings["PC2_abs"] = loadings["PC1_loading"].abs(), loadings["PC2_loading"].abs()
-    loadings.sort_values("PC1_abs", ascending=False).to_csv(PCA_LOADINGS_PATH)
+    loadings.sort_values("PC1_abs", ascending=False).to_csv(OUT_ROOT / "pca_loadings.csv")
     print(f"    Saved: pca_coords.npz, pca_loadings.csv, pca_overlap_summary.csv")
 
     return {
-        "variant": "no_impute", "output_dir": str(OUT_ROOT),
+        "variant": "cfb6920_missing_mask", "output_dir": str(OUT_ROOT),
         "pc1_variance_pct": round(var1 * 100, 2),
         "pc2_variance_pct": round(var2 * 100, 2),
         "pc12_variance_pct": round((var1 + var2) * 100, 2),
@@ -675,13 +645,41 @@ def main() -> None:
         if missing:
             raise ValueError(f"{name} missing columns: {missing}")
 
-    # 中文注释：太古代数据预处理（完整度 + 玄武岩主量筛选），现代训练集不做该筛选。
+    if archean_raw["AGE"].isna().any():
+        raise ValueError("Age-constrained Archean input still contains missing AGE values")
+
+    # 中文注释：正式PCA只使用无水SiO2 44-53 wt%的3012条太古代样品。
     archean_raw = preprocess_archean(archean_raw)
+    if len(archean_raw) != 3012:
+        raise ValueError(
+            f"正式太古代PCA输入应为3012条，实际为 {len(archean_raw)} 条"
+        )
+    print(f"  Archean after 44-53 wt% filtering: {len(archean_raw):,} rows")
 
     # 标签清理
     modern_raw.dropna(subset=[TECTONIC_COL], inplace=True)
     modern_raw[TECTONIC_COL] = modern_raw[TECTONIC_COL].astype(str).str.strip().str.upper()
     modern_raw.reset_index(drop=True, inplace=True)
+    # 中文注释：PCA现代参考集使用与最终GeoDAN完全一致的CFB确定性欠采样。
+    cfb_indices = np.flatnonzero(
+        modern_raw[TECTONIC_COL].to_numpy() == "CONTINENTAL FLOOD BASALT"
+    )
+    if len(cfb_indices) < CFB_TARGET_COUNT:
+        raise ValueError(
+            f"现代训练集CFB只有 {len(cfb_indices)} 条，不能保留 {CFB_TARGET_COUNT} 条"
+        )
+    selected_cfb = np.sort(
+        np.random.default_rng(RANDOM_SEED).choice(
+            cfb_indices,
+            size=CFB_TARGET_COUNT,
+            replace=False,
+        )
+    )
+    non_cfb_indices = np.flatnonzero(
+        modern_raw[TECTONIC_COL].to_numpy() != "CONTINENTAL FLOOD BASALT"
+    )
+    keep_indices = np.sort(np.concatenate([non_cfb_indices, selected_cfb]))
+    modern_raw = modern_raw.iloc[keep_indices].reset_index(drop=True)
     print(f"  Modern raw after label cleanup: {len(modern_raw):,}")
 
     labels_raw = modern_raw[TECTONIC_COL].values
@@ -693,25 +691,45 @@ def main() -> None:
     palette = plt.cm.tab10(np.linspace(0, 1, max(10, len(classes))))
     colors = {cls: palette[i] for i, cls in enumerate(classes)}
 
-    # 太古代置信度（用原始 CSV，跟太古代行索引同步）
-    arch_conf = (pd.to_numeric(archean_raw[CONFIDENCE_COL], errors="coerce").to_numpy(dtype=float)
-                 if CONFIDENCE_COL in archean_raw.columns else None)
-    high_mask = (arch_conf >= HIGH_CONF_THRESHOLD) if arch_conf is not None else None
-    low_mask = (arch_conf < LOW_CONF_THRESHOLD) if arch_conf is not None else None
-    if high_mask is not None:
-        print(f"\nArchean high arc-affinity (P_arc >= {HIGH_CONF_THRESHOLD}): "
-              f"{high_mask.sum():,} / {len(arch_conf):,}")
-        print(f"Archean low  arc-affinity (P_arc <  {LOW_CONF_THRESHOLD}): "
-              f"{low_mask.sum():,} / {len(arch_conf):,}")
+    # 中文注释：直接读取最终CFB=6920、Mask、不插补方案的预测概率，避免PCA另行推理。
+    final_prediction = pd.read_csv(FINAL_PREDICTION_PATH, low_memory=False)
+    if len(final_prediction) != len(archean_raw):
+        raise ValueError(
+            f"最终预测与太古代原始数据行数不一致: "
+            f"{len(final_prediction)} != {len(archean_raw)}"
+        )
+    arch_conf = pd.to_numeric(
+        final_prediction["Arc_probability3"],
+        errors="coerce",
+    ).to_numpy()
+    if not np.isfinite(arch_conf).all():
+        raise ValueError("Arc_probability3 contains missing or infinite values")
+    high_mask = arch_conf >= HIGH_CONF_THRESHOLD
+    low_mask = arch_conf < LOW_CONF_THRESHOLD
+    print(f"\nArchean high arc-affinity by GeoDAN (P_arc >= {HIGH_CONF_THRESHOLD}): "
+          f"{high_mask.sum():,} / {len(arch_conf):,}")
+    print(f"Archean low  arc-affinity by GeoDAN (P_arc <  {LOW_CONF_THRESHOLD}): "
+          f"{low_mask.sum():,} / {len(arch_conf):,}")
 
-    # 中文注释：只保留无插值版本，现代和太古代都直接从原始 CSV 抽取元素特征。
+    # 中文注释：太古代连续数据保持原始缺失；PCA中仅将缺失放在现代标准化均值位置。
     modern_raw_feats = extract_elements(modern_raw)
     arch_raw_feats = extract_elements(archean_raw)
 
-    # 中文注释：只运行无插值 PCA，不再生成 imputed 版本或版本比较表。
-    result = run_no_impute(modern_raw_feats, arch_raw_feats, labels_raw, classes, colors,
-                           high_mask, low_mask, arch_conf)
-    print(f"\nNo-impute PCA summary:\n{pd.DataFrame([result]).to_string(index=False)}\n\nDone.")
+    # 中文注释：PCA 使用连续含量，不使用分位数分箱后的1-255编码。
+    result = run_continuous_pca(
+        modern_raw_feats,
+        arch_raw_feats,
+        labels_raw,
+        classes,
+        colors,
+        high_mask,
+        low_mask,
+        arch_conf,
+    )
+    print(
+        "\nContinuous-data PCA summary:\n"
+        f"{pd.DataFrame([result]).to_string(index=False)}\n\nDone."
+    )
 
 
 if __name__ == "__main__":

@@ -547,7 +547,8 @@ def save_output(data: pd.DataFrame, output_path: str) -> None:
 
 def organize_like_liu(process_data: pd.DataFrame) -> pd.DataFrame:
     """按Liu共享文件的57列结构组织最终扩展太古代数据。"""
-    # 中文注释：06_archean_application 目录不是Python包，显式加入完整目录后导入。
+    # 中文注释：06_archean_application 目录不是Python包，显式加入后导入池构建函数。
+    # 当前工程把池构建保留在 extended_archean_pool_analysis.py（CNNtest 已并入 archean_data_preprocess.py）。
     _archean_dir = str(_PROJECT_ROOT / "06_archean_application")
     if _archean_dir not in sys.path:
         sys.path.insert(0, _archean_dir)

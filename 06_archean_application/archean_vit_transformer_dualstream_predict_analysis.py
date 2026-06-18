@@ -36,7 +36,15 @@ from config.paths import (
     TRAIN_NORM_CSV, QUANTILE_PARAMS_JSON, MAIN_MODEL_WEIGHT,
 )
 
-from archean_s3_preprocess import preprocess_archean
+# 中文注释：当前工程保留 archean_s3_preprocess.py 命名（CNNtest 中为 archean_data_preprocess.py）。
+from archean_s3_preprocess import (
+    CASE_STUDIES_ORDER,
+    CaseStudyConfig,
+    build_case_study_configs,
+    load_final_age_constrained_pool,
+    preprocess_archean,
+    preprocess_case_study,
+)
 
 # 中文注释：04_model 目录以数字开头，无法用常规包导入，改用 importlib 加载训练脚本。
 _TRAINING_MODULE_FILE = _PROJECT_ROOT / "04_model" / "ablation_v4_vit_transformer.py"
@@ -326,7 +334,6 @@ COLUMNS_ELECTRODE_ORDER = _COLUMNS_SEQ_V2 if _COLUMN_ORDER_SCHEME == 'v2' else _
 # 中文注释：v1正式预测严格复用训练脚本中的矩阵与序列列顺序。
 if _COLUMN_ORDER_SCHEME == "v1":
     _training_module = _load_training_module()
-
     COLUMNS_TO_EXTRACT = list(_training_module.ORIGINAL_IMAGE_COLUMNS)
     COLUMNS_ELECTRODE_ORDER = list(_training_module.COLUMNS_ELECTRODE_ORDER_V1)
 
@@ -660,7 +667,10 @@ def add_age_bins(df: pd.DataFrame, bin_size_myr: int) -> pd.DataFrame:
     对 C_AGE（校正年龄，单位 Ma）列进行等宽分箱，新增 age_bin / age_bin_mid_ma / age_bin_label 列。
     """
     out   = df.copy()
-    age   = pd.to_numeric(out["C_AGE"], errors="coerce")
+    age = pd.to_numeric(out["C_AGE"], errors="coerce")
+    # 中文注释：Liu优先使用校正年龄C_AGE；GeoROC没有C_AGE时使用补录的AGE。
+    if "AGE" in out.columns:
+        age = age.fillna(pd.to_numeric(out["AGE"], errors="coerce"))
     start = int(np.floor(age.min() / bin_size_myr) * bin_size_myr)
     stop  = int(np.ceil(age.max()  / bin_size_myr) * bin_size_myr + bin_size_myr)
     bins  = np.arange(start, stop + 1, bin_size_myr)
@@ -676,8 +686,10 @@ def summarize_liu_baseline_by_age(
     source_path: Path,
     bin_size_myr: int,
 ) -> pd.DataFrame:
-    """直接从 Liu 原始数据按年龄分箱统计 Arc_probability3 >= 0.5 的比例。"""
+    """按正式44-53 wt%口径统计Liu原始Arc_probability3年龄曲线。"""
     liu = read_csv_fallback(source_path)
+    # 中文注释：正式太古代口径固定为无水SiO2 44-53 wt%、MgO不大于18 wt%。
+    liu = preprocess_archean(liu, expected_sample_count=2116)
     required_columns = {"C_AGE", "Arc_probability3"}
     missing_columns = required_columns.difference(liu.columns)
     if missing_columns:
@@ -2195,64 +2207,13 @@ def plot_main_composite_figure(
 #  案例研究预测（6 个克拉通案例）
 # ══════════════════════════════════════════════════════════════════════════════
 
-CASE_STUDIES_ORDER = [
-    ("Isua", "Isua", 3.75),
-    ("Barberton", "Barberton", 3.45),
-    ("Pilbara", "Pilbara", 3.30),
-    ("Belingwe", "Belingwe", 2.80),
-    ("Abitibi", "Abitibi", 2.70),
-    ("North_China_Craton", "North China Craton", 2.55),
-]
-CASE_STUDY_TITLES = {
-    case_label: case_title
-    for case_label, case_title, _ in CASE_STUDIES_ORDER
-}
 CASE_STUDY_OUTPUT_ROOT = Path(str(ARCHEAN_CASE_DIR))
 CASE_RAW_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / "raw"
 CASE_PREPROCESSED_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / "preprocessed"
 CASE_PREDICTIONS_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / "predictions"
 CASE_SUMMARY_CSV_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "case_study_summary.csv"
-CASE_FIG_BARS_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "fig_case_studies_bars.png"
-CASE_FIG_HEATMAP_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "fig_case_studies_heatmap.png"
-CASE_FIG_STACKED_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "fig_case_studies_stacked.png"
-
-# 6 克拉通案例原始数据目录（与 Liu 数据同放在 data/archean/data 下）
-CASE_SOURCE_DIR = Path(str(ARCHEAN_DATA_SUBDIR))
-
-
-@dataclass(frozen=True)
-class CaseStudyConfig:
-    """单个绿岩带案例的原始数据和输出配置。"""
-    case_label: str
-    case_title: str
-    approx_age_ga: float
-    source_path: Path
-    raw_output_path: Path
-    preprocessed_path: Path
-    predictions_path: Path
-
-
-def build_case_study_configs() -> list[CaseStudyConfig]:
-    """生成六个案例的显式配置，分别保存原始、预处理和预测结果。"""
-
-    def _case(case_label: str, case_title: str, approx_age_ga: float,
-              source_name: str) -> CaseStudyConfig:
-        return CaseStudyConfig(
-            case_label, case_title, approx_age_ga,
-            CASE_SOURCE_DIR / source_name,
-            CASE_RAW_OUTPUT_DIR / f"{case_label}_raw.csv",
-            CASE_PREPROCESSED_OUTPUT_DIR / f"{case_label}_preprocessed.csv",
-            CASE_PREDICTIONS_OUTPUT_DIR / f"{case_label}_predictions.csv",
-        )
-
-    return [
-        _case("Isua", "Isua", 3.75, "Isua.csv"),
-        _case("Barberton", "Barberton", 3.45, "Barberton.csv"),
-        _case("Pilbara", "Pilbara", 3.30, "Pilbara.csv"),
-        _case("Belingwe", "Belingwe", 2.80, "Belingwe_Zimbabwe.csv"),
-        _case("Abitibi", "Abitibi", 2.70, "Superior_Abitibi.csv"),
-        _case("North_China_Craton", "North China Craton", 2.55, "North_China_Craton.csv"),
-    ]
+# 中文注释：左栏六联柱状图、右栏高弧KDE山脊图的组合主图。
+CASE_FIG_COMBINED_PATH = CASE_PREDICTIONS_OUTPUT_DIR / "fig_case_studies_bars_ridgeline.png"
 
 
 def predict_one_case(
@@ -2260,33 +2221,16 @@ def predict_one_case(
     class_names: list[str],
 ) -> Optional[pd.DataFrame]:
     """保存案例原始表，严格预处理后再用缺失编码模型执行预测。"""
-    if not case_config.source_path.exists():
-        print(f"  [警告] 缺少案例数据: {case_config.source_path}")
+    # 中文注释：案例读取、路径和44-53 wt%筛选统一由预处理模块负责。
+    preprocessed = preprocess_case_study(case_config)
+    if preprocessed is None:
         return None
-
-    raw_data = read_csv_fallback(case_config.source_path)
-    case_config.raw_output_path.parent.mkdir(parents=True, exist_ok=True)
-    raw_data.to_csv(
-        case_config.raw_output_path,
-        index=False,
-        encoding="utf-8-sig",
-    )
-
-    # 中文注释：复用太古代主预处理流程，严格执行缺失数<18、五项主量有效、
-    # 主量无水标准化及SiO2=44-53 wt%、MgO<=18 wt%的筛选。
-    preprocessed = preprocess_archean(raw_data)
-    case_config.preprocessed_path.parent.mkdir(parents=True, exist_ok=True)
-    preprocessed.to_csv(
-        case_config.preprocessed_path,
-        index=False,
-        encoding="utf-8-sig",
-    )
     print(
-        f"  原始样品 {len(raw_data)}，严格预处理后 {len(preprocessed)}"
+        f"  严格预处理后 {len(preprocessed)}"
     )
 
-    metadata, normalized = _prepare_archean_features(
-        case_config.preprocessed_path,
+    metadata, normalized = _prepare_archean_features_from_metadata(
+        preprocessed,
     )
     if metadata.empty:
         print(f"  [警告] [{case_config.case_label}] 没有有效样品，跳过。")
@@ -2436,165 +2380,6 @@ def plot_case_studies_bars(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 案例研究图 2：6 案例 × 9 类比例 heatmap
-# ──────────────────────────────────────────────────────────────────────────────
-
-def plot_case_studies_heatmap(
-    case_results: dict[str, pd.DataFrame],
-    class_names: list[str],
-    output_path: Path,
-) -> None:
-    """
-    6 案例 × 9 类比例 heatmap。
-    优势：一图把所有案例的判别构成放在同一画布上对比，
-          弧相关三类（CA/IOA/IA）的强弱在视觉上立即可读。
-    """
-    case_order = [c for c, _, _ in CASE_STUDIES_ORDER if c in case_results]
-    if not case_order:
-        print("  ⚠ 无案例预测结果可绘 heatmap")
-        return
-
-    n_cases = len(case_order)
-    n_class = len(class_names)
-    matrix = np.zeros((n_cases, n_class))
-    n_per_case: list[int] = []
-    arc_pct_per_case: list[float] = []
-
-    for i, case in enumerate(case_order):
-        df = case_results[case]
-        n = len(df)
-        n_per_case.append(n)
-        arc_n = int(df["pred_class_name"].isin(ARC_RELATED_LABELS).sum())
-        arc_pct_per_case.append(arc_n / n if n else 0)
-        for j, cls in enumerate(class_names):
-            cnt = int((df["pred_class_name"] == cls).sum())
-            matrix[i, j] = cnt / n if n else 0
-
-    fig, ax = plt.subplots(figsize=(9.5, 0.8 * n_cases + 2.0))
-    im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd", vmin=0, vmax=1.0)
-
-    # ── 轴标签 ──
-    ax.set_xticks(range(n_class))
-    ax.set_xticklabels([CLASS_ABBREVS.get(c, c) for c in class_names], fontsize=10)
-    # 给弧相关类别（CA/IOA/IA）的 x 标签加粗+暖色
-    for tick, cls in zip(ax.get_xticklabels(), class_names):
-        if cls in ARC_RELATED_LABELS:
-            tick.set_fontweight("bold")
-            tick.set_color(COLOR_HIGHLIGHT)
-
-    ax.set_yticks(range(n_cases))
-    ax.set_yticklabels(
-        [f"{CASE_STUDY_TITLES.get(c, c)}\n(n={n}, arc={p*100:.0f}%)"
-         for c, n, p in zip(case_order, n_per_case, arc_pct_per_case)],
-        fontsize=9,
-    )
-
-    # ── 在每格写百分比 ──
-    for i in range(n_cases):
-        for j in range(n_class):
-            v = matrix[i, j]
-            if v >= 0.005:  # >=0.5% 才标
-                txt_color = "white" if v > 0.55 else "0.15"
-                ax.text(j, i, f"{v*100:.0f}", ha="center", va="center",
-                        fontsize=8, color=txt_color, fontweight="bold")
-
-    # ── 颜色条 ──
-    cbar = plt.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
-    cbar.set_label("Predicted class proportion", fontsize=9)
-    cbar.ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
-    cbar.ax.tick_params(labelsize=8)
-
-    ax.set_xlabel("Tectonic setting (arc-related labels in red bold)", fontsize=10)
-    ax.set_title(
-        "Case-by-class predicted proportion matrix",
-        loc="left", pad=8, fontsize=11, fontweight="bold",
-    )
-    # 网格线分隔每格
-    ax.set_xticks(np.arange(-0.5, n_class, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, n_cases, 1), minor=True)
-    ax.grid(which="minor", color="white", linewidth=1.2)
-    ax.tick_params(which="minor", bottom=False, left=False)
-
-    fig.tight_layout()
-    _save_figure(fig, output_path)
-    plt.close(fig)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 案例研究图 3：6 案例 100% 横向堆积柱
-# ──────────────────────────────────────────────────────────────────────────────
-
-def plot_case_studies_stacked_bar(
-    case_results: dict[str, pd.DataFrame],
-    class_names: list[str],
-    output_path: Path,
-) -> None:
-    """
-    6 案例 100% 横向堆积柱：每个案例一根 100% 柱，9 类按 CLASS_COLORS 配色。
-    一眼对比 6 个地区的弧型/非弧型相对占比。
-    """
-    case_order = [c for c, _, _ in CASE_STUDIES_ORDER if c in case_results]
-    if not case_order:
-        return
-
-    n_cases = len(case_order)
-    matrix = np.zeros((n_cases, len(class_names)))
-    n_per_case: list[int] = []
-
-    for i, case in enumerate(case_order):
-        df = case_results[case]
-        n = len(df)
-        n_per_case.append(n)
-        for j, cls in enumerate(class_names):
-            cnt = int((df["pred_class_name"] == cls).sum())
-            matrix[i, j] = cnt / n if n else 0
-
-    fig, ax = plt.subplots(figsize=(11.0, 0.7 * n_cases + 1.8))
-
-    y_pos = np.arange(n_cases)
-    left = np.zeros(n_cases)
-    for j, cls in enumerate(class_names):
-        vals = matrix[:, j]
-        ax.barh(
-            y_pos, vals, left=left, height=0.65,
-            color=CLASS_COLORS.get(cls, "#999999"),
-            edgecolor="white", linewidth=0.6,
-            label=cls,
-        )
-        # 仅在 ≥6% 占比的段内写百分比
-        for yi, (v, l) in enumerate(zip(vals, left)):
-            if v >= 0.06:
-                ax.text(l + v / 2, yi, f"{v*100:.0f}%",
-                        ha="center", va="center",
-                        fontsize=8, color="white", fontweight="bold")
-        left += vals
-
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels([f"{CASE_STUDY_TITLES.get(c, c)}  (n = {n})" for c, n in zip(case_order, n_per_case)],
-                       fontsize=9)
-    ax.invert_yaxis()
-    ax.set_xlim(0, 1)
-    ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
-    ax.set_xlabel("Predicted class proportion")
-    ax.set_title("Predicted tectonic affinity composition of six Archean cases",
-                 loc="left", pad=6)
-
-    handles = [mpatches.Patch(color=CLASS_COLORS.get(c, "#999999"),
-                              label=f"{CLASS_ABBREVS.get(c, c)} — {c}")
-               for c in class_names]
-    ax.legend(handles=handles, ncol=3, loc="upper center",
-              bbox_to_anchor=(0.5, -0.18), fontsize=8,
-              frameon=True, edgecolor="0.7")
-    ax.grid(True, axis="x", linestyle="--", linewidth=0.4,
-            color="0.7", alpha=0.5)
-    ax.set_axisbelow(True)
-
-    fig.tight_layout()
-    _save_figure(fig, output_path)
-    plt.close(fig)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # 案例研究主流程
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -2632,13 +2417,11 @@ def run_case_studies(
     summarize_case_studies(case_results, class_names, CASE_SUMMARY_CSV_PATH)
     print(f"\n  汇总 CSV: {CASE_SUMMARY_CSV_PATH}")
 
-    # 3 张组合图
-    print("  绘制案例图 1/3: 6 子图横向柱状")
-    plot_case_studies_bars(case_results, class_names, CASE_FIG_BARS_PATH)
-    print("  绘制案例图 2/3: 6 案例 × 9 类 heatmap")
-    plot_case_studies_heatmap(case_results, class_names, CASE_FIG_HEATMAP_PATH)
-    print("  绘制案例图 3/3: 6 案例 100% 横向堆积柱")
-    plot_case_studies_stacked_bar(case_results, class_names, CASE_FIG_STACKED_PATH)
+    # 中文注释：案例研究统一输出左右双栏主图。
+    from archean_case_studies_map_ridgeline import plot_case_studies_bars_ridgeline
+
+    print("  绘制案例双栏主图: 左侧六联柱状图，右侧高弧KDE山脊图")
+    plot_case_studies_bars_ridgeline(case_results, CASE_FIG_COMBINED_PATH)
 
     print(f"\n案例研究完成。输出根目录: {CASE_STUDY_OUTPUT_ROOT}")
     return case_results
@@ -2800,6 +2583,18 @@ def _prepare_archean_features(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """将太古代原始数据转换为1-255编码，缺失单元固定保留为0。"""
     metadata = read_csv_fallback(archean_path)
+    return _prepare_archean_features_from_metadata(
+        metadata,
+        max_missing_features=max_missing_features,
+    )
+
+
+def _prepare_archean_features_from_metadata(
+    metadata: pd.DataFrame,
+    max_missing_features: Optional[int] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """将内存中的太古代数据转换为1-255编码，缺失单元固定保留为0。"""
+    metadata = metadata.copy()
     features = _extract_archean_feature_table(metadata)
 
     missing_count = features.isna().sum(axis=1)
@@ -2918,7 +2713,7 @@ FINAL_OUTPUT_DIR = Path(str(ARCHEAN_FINAL_DIR))
 FINAL_PREDICTION_PATH = Path(str(ARCHEAN_FINAL_PREDICTIONS_CSV))
 FINAL_COMPOSITE_PATH = FINAL_OUTPUT_DIR / "fig_main_composite_tectonic.png"
 def run_final_prediction() -> None:
-    """运行固定正文方案：CFB=6920、显式缺失编码、太古代原始数据。"""
+    """运行固定正文方案：CFB=6920、显式缺失编码、SiO2 44-53 wt%。"""
     required_paths = [
         FINAL_ARCHEAN_RAW_PATH,
         QUANTILE_PARAMS_PATH,
@@ -2933,9 +2728,11 @@ def run_final_prediction() -> None:
         )
 
     print("=" * 80)
-    print("最终方案：CFB=6920 + 缺失编码 + 太古代原始数据")
+    print("最终方案：CFB=6920 + 缺失编码 + 太古代SiO2 44-53 wt%")
     class_names = load_class_names(TRAIN_PATH)
-    metadata, normalized = _prepare_archean_features(FINAL_ARCHEAN_RAW_PATH)
+    # 中文注释：正式3012条总池由统一预处理模块读取和筛选。
+    metadata = load_final_age_constrained_pool()
+    metadata, normalized = _prepare_archean_features_from_metadata(metadata)
     missing_mask = _build_archean_missing_mask(metadata)
     FINAL_ARCHEAN_MASK_PATH.parent.mkdir(parents=True, exist_ok=True)
     missing_mask.to_csv(

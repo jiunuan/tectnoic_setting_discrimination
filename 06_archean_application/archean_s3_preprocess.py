@@ -1,7 +1,8 @@
-"""
-太古代玄武岩应用口径筛选（与 PCA 一致性脚本同一处理口径）。
+"""太古代玄武岩应用口径筛选 + 六案例区统一预处理。
 
-本脚本只负责：
+本脚本负责两部分：
+
+一、统一应用口径筛选（`preprocess_archean`，被多个脚本复用）：
 1. 提取36个地球化学特征；
 2. 按 NaN、0 或负值统计缺失数，保留缺失数小于18的样品；
 3. 要求 SiO2、Al2O3、FeOT、MgO、CaO 为有效正值；
@@ -10,23 +11,38 @@
 
 `preprocess_archean()` 同时被正式预测脚本
 archean_vit_transformer_dualstream_predict_analysis.py 复用，
-用于 6 克拉通案例数据的统一预处理。
+用于 Liu 全库与 6 克拉通案例数据的统一预处理。
 
-注意：扩展太古代应用集（3,483 条）的构建入口是
-extended_archean_pool_analysis.py（SiO2 上限放宽到 54 wt%），
-本脚本 main() 仅复现 Liu 数据严格口径（SiO2≤53）的筛选结果。
+二、六个案例区配置与预处理（供案例研究图与预测流程复用）：
+- `CASE_STUDIES_ORDER` / `CASE_STUDY_TITLES`：六个案例区的标签、展示名与代表年龄；
+- `CaseStudyConfig` / `build_case_study_configs()`：每个案例的输入与输出路径配置；
+- `preprocess_case_study()`：读取、区域定位（克拉通/年龄/文献关键词）、保存原始表，
+  并按统一44-53 wt%口径筛选单个案例；
+- `load_final_age_constrained_pool()`：读取正式年龄约束总池并执行同口径筛选。
+
+注意：候选池（3,483 条，SiO2≤54 wt%）的构建入口是
+extended_archean_pool_analysis.py；正式太古代应用集与现代训练集口径一致，
+统一为无水 SiO2≤53 wt%，由 `load_final_age_constrained_pool()` 对候选池
+筛选得到 3,012 条（EXPECTED_FINAL_COUNT）。本脚本 main() 复现 Liu 数据严格
+口径（SiO2≤53）的 2,116 条筛选结果，并对六个案例区做统一预处理。
 """
 
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.paths import ARCHEAN_S3_CSV, ARCHEAN_DATA_SUBDIR
+from config.paths import (
+    ARCHEAN_S3_CSV,
+    ARCHEAN_DATA_SUBDIR,
+    ARCHEAN_CASE_DIR,
+    ARCHEAN_POOL_CSV,
+)
 
 
 # ============================================================================
@@ -42,6 +58,9 @@ SIO2_MIN = 44.0
 SIO2_MAX = 53.0
 MGO_MAX = 18.0
 EXPECTED_SAMPLE_COUNT = 2116
+# 中文注释：正式太古代应用集与现代训练集一致，固定为无水 SiO2≤53 wt% 口径；
+# 候选池（extended_archean_pool_analysis.py，SiO2≤54）经本口径筛选后为 3012 条。
+EXPECTED_FINAL_COUNT = 3012
 
 SHORT_CHEMICAL_COLUMNS = [
     'NA2O', 'MGO', 'AL2O3', 'SIO2', 'P2O5', 'K2O', 'CAO', 'TIO2',
@@ -70,6 +89,14 @@ CHEMICAL_COLUMN_MAPPING = {
     'ER': 'ER(PPM)', 'YB': 'YB(PPM)', 'LU': 'LU(PPM)', 'HF': 'HF(PPM)',
     'TA': 'TA(PPM)', 'TH': 'TH(PPM)',
 }
+
+
+def read_csv_fallback(file_path: Path | str) -> pd.DataFrame:
+    """兼容 UTF-8 与 UTF-8 BOM 读取 CSV。"""
+    try:
+        return pd.read_csv(file_path, low_memory=False, encoding='utf-8')
+    except UnicodeDecodeError:
+        return pd.read_csv(file_path, low_memory=False, encoding='utf-8-sig')
 
 
 def extract_chemical_features(data: pd.DataFrame) -> pd.DataFrame:
@@ -119,8 +146,10 @@ def normalize_major_elements(features: pd.DataFrame) -> pd.DataFrame:
 def preprocess_archean(
     data: pd.DataFrame,
     expected_sample_count: int | None = None,
+    *,
+    dataset_name: str = '太古代样品',
 ) -> pd.DataFrame:
-    """执行与 PCA 脚本完全一致的太古代样品筛选。"""
+    """执行与 PCA 脚本完全一致的太古代样品筛选（44-53 wt% 正式口径）。"""
     features = extract_chemical_features(data)
     original_count = len(data)
 
@@ -161,30 +190,225 @@ def preprocess_archean(
     ].to_numpy()
     result.reset_index(drop=True, inplace=True)
 
-    print(f'[原始样品] {original_count}')
+    print(f'[{dataset_name}] 原始样品: {original_count}')
     print(
-        f'[缺失筛选] missing < {MAX_MISSING_FEATURES_EXCLUSIVE}: '
+        f'[{dataset_name}] 缺失数 < {MAX_MISSING_FEATURES_EXCLUSIVE}: '
         f'{count_after_missing}'
     )
-    print(f'[关键主量有效] {count_after_required}')
+    print(f'[{dataset_name}] 五项关键主量有效: {count_after_required}')
     print(
-        f'[玄武岩筛选] SiO2={SIO2_MIN:g}-{SIO2_MAX:g}, '
+        f'[{dataset_name}] 无水SiO2={SIO2_MIN:g}-{SIO2_MAX:g}, '
         f'MgO<={MGO_MAX:g}: {len(result)}'
     )
 
     if expected_sample_count is not None and len(result) != expected_sample_count:
         raise ValueError(
-            f'筛选结果应为 {expected_sample_count} 条，实际为 {len(result)} 条'
+            f'{dataset_name}筛选结果应为 {expected_sample_count} 条，'
+            f'实际为 {len(result)} 条'
         )
     return result
 
 
+def load_final_age_constrained_pool(
+    *,
+    expected_sample_count: int | None = EXPECTED_FINAL_COUNT,
+) -> pd.DataFrame:
+    """读取年龄约束候选池（ARCHEAN_POOL_CSV）并执行正式 SiO2≤53 wt% 筛选。
+
+    候选池为 SiO2≤54 的 3,483 条；经与训练集一致的 44-53 wt% 口径筛选后，
+    得到正式应用集 3,012 条（与 EXPECTED_FINAL_COUNT 一致）。
+    """
+    data = read_csv_fallback(ARCHEAN_POOL_CSV)
+    return preprocess_archean(
+        data,
+        expected_sample_count=expected_sample_count,
+        dataset_name='正式太古代总池',
+    )
+
+
+# ============================================================================
+# 六个案例区配置与筛选
+# ============================================================================
+
+# 中文注释：案例区按代表年龄从老到新排列，标签即预测/图件文件名前缀。
+CASE_STUDIES_ORDER = [
+    ('Isua', 'Isua', 3.75),
+    ('Pilbara', 'Pilbara', 3.30),
+    ('Ivisaartoq', 'Ivisaartoq', 3.05),
+    ('Norseman_Kambalda', 'Norseman-Kambalda', 2.69),
+    ('Abitibi', 'Abitibi', 2.70),
+    ('North_China_Craton', 'North China Craton', 2.55),
+]
+CASE_STUDY_TITLES = {
+    case_label: case_title
+    for case_label, case_title, _ in CASE_STUDIES_ORDER
+}
+
+# 中文注释：案例区输入/输出目录全部相对 config/paths.py 推导。
+CASE_SOURCE_DIR = Path(str(ARCHEAN_DATA_SUBDIR))
+CASE_STUDY_OUTPUT_ROOT = Path(str(ARCHEAN_CASE_DIR))
+CASE_RAW_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / 'raw'
+CASE_PREPROCESSED_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / 'preprocessed'
+CASE_PREDICTIONS_OUTPUT_DIR = CASE_STUDY_OUTPUT_ROOT / 'predictions'
+CASE_SUMMARY_CSV_PATH = CASE_PREDICTIONS_OUTPUT_DIR / 'case_study_summary.csv'
+# 中文注释：左栏六联柱状图、右栏高弧KDE山脊图的组合主图。
+CASE_FIG_COMBINED_PATH = (
+    CASE_PREDICTIONS_OUTPUT_DIR / 'fig_case_studies_bars_ridgeline.png'
+)
+
+
+@dataclass(frozen=True)
+class CaseStudyConfig:
+    """单个案例区的输入与预处理输出配置。"""
+
+    case_label: str
+    case_title: str
+    approx_age_ga: float
+    source_path: Path
+    raw_output_path: Path
+    preprocessed_path: Path
+    predictions_path: Path
+    # 中文注释：以下字段仅用于"从正式总池抽取地质单元"的案例（如 Ivisaartoq）。
+    source_craton: str | None = None
+    age_min_ma: float | None = None
+    age_max_ma: float | None = None
+    reference_keyword: str | None = None
+
+
+def build_case_study_configs() -> list[CaseStudyConfig]:
+    """生成六个案例的显式配置，分别保存原始、预处理和预测结果。"""
+
+    def _case(
+        case_label: str,
+        case_title: str,
+        approx_age_ga: float,
+        source_path: Path,
+        *,
+        source_craton: str | None = None,
+        age_min_ma: float | None = None,
+        age_max_ma: float | None = None,
+        reference_keyword: str | None = None,
+    ) -> CaseStudyConfig:
+        return CaseStudyConfig(
+            case_label,
+            case_title,
+            approx_age_ga,
+            source_path,
+            CASE_RAW_OUTPUT_DIR / f'{case_label}_raw.csv',
+            CASE_PREPROCESSED_OUTPUT_DIR / f'{case_label}_preprocessed.csv',
+            CASE_PREDICTIONS_OUTPUT_DIR / f'{case_label}_predictions.csv',
+            source_craton=source_craton,
+            age_min_ma=age_min_ma,
+            age_max_ma=age_max_ma,
+            reference_keyword=reference_keyword,
+        )
+
+    return [
+        _case('Isua', 'Isua', 3.75, CASE_SOURCE_DIR / 'Isua.csv'),
+        _case('Pilbara', 'Pilbara', 3.30, CASE_SOURCE_DIR / 'Pilbara.csv'),
+        # 中文注释：Ivisaartoq 没有独立原始表，从正式总池按克拉通+年龄+文献关键词定位。
+        _case(
+            'Ivisaartoq', 'Ivisaartoq', 3.05,
+            Path(str(ARCHEAN_POOL_CSV)),
+            source_craton='North Atlantic Craton',
+            age_min_ma=3000.0,
+            age_max_ma=3100.0,
+            reference_keyword='IVISAARTOQ',
+        ),
+        _case(
+            'Norseman_Kambalda', 'Norseman-Kambalda', 2.69,
+            CASE_SOURCE_DIR / 'Norseman&Kambalda.csv',
+        ),
+        _case('Abitibi', 'Abitibi', 2.70, CASE_SOURCE_DIR / 'Superior_Abitibi.csv'),
+        _case(
+            'North_China_Craton', 'North China Craton', 2.55,
+            CASE_SOURCE_DIR / 'North_China_Craton.csv',
+        ),
+    ]
+
+
+def preprocess_case_study(
+    case_config: CaseStudyConfig,
+) -> pd.DataFrame | None:
+    """读取、区域定位、保存并按统一44-53 wt%规则筛选一个案例区。"""
+    if not case_config.source_path.exists():
+        print(f'  [警告] 缺少案例数据: {case_config.source_path}')
+        return None
+
+    raw_data = read_csv_fallback(case_config.source_path)
+
+    # 中文注释：正式池案例先按克拉通、年龄和文献关键词定位具体地质单元。
+    if case_config.source_craton is not None:
+        if 'Craton' not in raw_data.columns:
+            raise ValueError(f'{case_config.case_title}数据缺少Craton列')
+        raw_data = raw_data.loc[
+            raw_data['Craton'].eq(case_config.source_craton)
+        ].copy()
+
+    if case_config.age_min_ma is not None or case_config.age_max_ma is not None:
+        if 'C_AGE' not in raw_data.columns or 'AGE' not in raw_data.columns:
+            raise ValueError(f'{case_config.case_title}数据缺少C_AGE或AGE列')
+        age_ma = pd.to_numeric(raw_data['C_AGE'], errors='coerce')
+        age_ma = age_ma.fillna(pd.to_numeric(raw_data['AGE'], errors='coerce'))
+        age_keep = pd.Series(True, index=raw_data.index)
+        if case_config.age_min_ma is not None:
+            age_keep &= age_ma.ge(case_config.age_min_ma)
+        if case_config.age_max_ma is not None:
+            age_keep &= age_ma.le(case_config.age_max_ma)
+        raw_data = raw_data.loc[age_keep].copy()
+
+    if case_config.reference_keyword is not None:
+        if 'REFERENCE' not in raw_data.columns:
+            raise ValueError(f'{case_config.case_title}数据缺少REFERENCE列')
+        reference_keep = raw_data['REFERENCE'].fillna('').astype(str).str.contains(
+            case_config.reference_keyword,
+            case=False,
+            regex=False,
+        )
+        raw_data = raw_data.loc[reference_keep].copy()
+
+    if raw_data.empty:
+        raise ValueError(f'{case_config.case_title}区域筛选后没有样品')
+
+    case_config.raw_output_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_data.to_csv(
+        case_config.raw_output_path,
+        index=False,
+        encoding='utf-8-sig',
+    )
+
+    # 中文注释：复用统一预处理流程，严格执行缺失数<18、五项主量有效、
+    # 主量无水标准化及SiO2=44-53 wt%、MgO<=18 wt%的筛选。
+    preprocessed = preprocess_archean(
+        raw_data,
+        dataset_name=case_config.case_title,
+    )
+    case_config.preprocessed_path.parent.mkdir(parents=True, exist_ok=True)
+    preprocessed.to_csv(
+        case_config.preprocessed_path,
+        index=False,
+        encoding='utf-8-sig',
+    )
+    return preprocessed
+
+
+def preprocess_all_case_studies() -> dict[str, pd.DataFrame]:
+    """批量筛选六个案例区并返回结果。"""
+    results: dict[str, pd.DataFrame] = {}
+    for case_config in build_case_study_configs():
+        result = preprocess_case_study(case_config)
+        if result is not None:
+            results[case_config.case_label] = result
+    return results
+
+
 def main() -> None:
-    """读取原始太古代数据并输出筛选后的2116条样品。"""
-    data = pd.read_csv(SOURCE_CSV, low_memory=False)
+    """复现 Liu 严格池 2116 条结果，并对六个案例区做统一预处理。"""
+    data = read_csv_fallback(SOURCE_CSV)
     result = preprocess_archean(
         data,
         expected_sample_count=EXPECTED_SAMPLE_COUNT,
+        dataset_name='Liu',
     )
     result.to_csv(OUTPUT_CSV, index=False, encoding='utf-8-sig')
 
@@ -195,6 +419,13 @@ def main() -> None:
         f'[主量总和范围] {major_sum.min():.6f}-'
         f'{major_sum.max():.6f}'
     )
+
+    print('=' * 72)
+    print('六个案例区预处理：')
+    case_results = preprocess_all_case_studies()
+    for case_label, _, _ in CASE_STUDIES_ORDER:
+        if case_label in case_results:
+            print(f'  {case_label}: {len(case_results[case_label])} 条')
 
 
 if __name__ == '__main__':

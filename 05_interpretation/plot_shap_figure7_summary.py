@@ -7,15 +7,16 @@ Figure 7 —— 直接运行 SHAP，并把各子图分别单独成图
 背景采样与 SHAP 计算逻辑；新增 **样本数控制**，默认给一个较小值方便测试。
 
 输出（每个子图单独成图，便于在 Visio 自由拼接）：
-  Figure7a_heatmap.png           —— (a) 9 类 × 36 元素 mean(|SHAP|) 热图
+  Figure7a_heatmap.png           —— (a) 9 类 × 36 元素 median(|SHAP|) 热图
   Figure7b_direction.png         —— (b) Top-15 元素 SHAP 方向热图（蓝-白-红）
-  Figure7c_ranking.png           —— (c) 全局 Top-20 元素重要性排名（按元素分组着色）
-  Figure7d_beeswarm_<setting>.*  —— (d) 各构造环境 Top-8 元素蜂窝图
+  Figure7c_ranking.png           —— (c) 真实类别输出 Top-20 稳健重要性排名
+  Figure7d_beeswarm_<setting>.*  —— (d) 各构造环境真实类别样本 Top-8 蜂窝图
 
 样本数控制（脚本默认变量）
 ------------------------
-默认：N_EXPLAIN_PER_CLASS = 100，N_BACKGROUND = 500，BATCH_SIZE = 50。
-背景样本按训练集类别比例分层抽样；待解释样本按每个类别固定数量抽样。
+默认：N_EXPLAIN_PER_CLASS = 300，N_BACKGROUND = 1000，BATCH_SIZE = 50。
+背景样本按训练集类别比例分层抽样；待解释样本按类别配额抽样。
+构造环境子图默认只统计该真实类别样本，并用 median(|SHAP|) 做稳健排名。
 如需调整样本数、输出目录或是否绘制蜂窝图，直接修改下方默认配置变量即可。
 
 运行环境
@@ -47,6 +48,9 @@ from shap_vit_transformer_dualstream import (
     OUTPUT_DIR,
     TRAIN_FILE,
     TEST_FILE,
+    TRAIN_MASK_FILE,
+    TEST_MASK_FILE,
+    USE_MISSING_MASK,
     MODEL_PATH,
     COLUMNS_IMG_ORDER,
     COLUMNS_ELECTRODE_ORDER,
@@ -62,14 +66,31 @@ import torch
 # ══════════════════════════════════════════════════════════════
 # ①  默认运行配置（取消 argparse，直接修改这里的变量即可）
 # ══════════════════════════════════════════════════════════════
-N_EXPLAIN_PER_CLASS = 500
+N_EXPLAIN_PER_CLASS = 300   # 未单独指定类别的抽样上限；样本不足时全取
+# 中文注释：只降低四个样本量较大/对 Ba 较敏感类别的解释样本数，不按 Ba 数值筛样本。
+EXPLAIN_CLASS_LIMITS = {
+    'CF': 200,
+    'CR': 200,
+    'OI': 200,
+    'MOR': 200,
+}
+EXPLAIN_FEATURE_QUANTILE_FILTERS = {}
 N_BACKGROUND = 1000
 BATCH_SIZE = 50
 RANDOM_SEED = 42
 MODEL_WEIGHT_PATH = MODEL_PATH
 # 中文注释：输出目录复用 SHAP 基础脚本的 OUTPUT_DIR（config/paths.py 的 MODELS_DIR 下）。
-OUTPUT_PANEL_DIR = os.path.join(base.OUTPUT_DIR, 'figure7_panels')
+OUTPUT_PANEL_DIR = os.path.join(base.OUTPUT_DIR, 'figure7_panels_true_class_median')
 DRAW_BEESWARM = True
+
+# 中文注释：如果缓存来自不同抽样策略，不要复用；正式无 Ba 区间筛选时建议重新计算。
+USE_CACHED_SHAP = False
+CACHED_SHAP_N = 2023
+
+# 中文注释：Figure7c 排名口径。
+# mean_all_outputs: 传统 mean(|SHAP|)，会强化跨类别输出和少数强响应样本；
+# true_class_median: 只取样本真实类别对应输出，并用中位数做稳健排名。
+RANKING_IMPORTANCE_STAT = 'true_class_median'
 
 # ── 蜂窝图(d)密度控制：每行随机抽样上限 + 点样式（只影响绘图，不改 SHAP 计算）──
 BEESWARM_MAX_POINTS = 180   # 每个元素行最多画多少点；None 表示全画
@@ -87,6 +108,15 @@ ELEMENT_GROUPS = [
                     'Tb', 'Dy', 'Ho', 'Er', 'Yb', 'Lu', 'Y']),
     ('Transition', ['V', 'Cr', 'Mn', 'Co', 'Ni']),
     ('Major',      ['Si', 'Ti', 'Al', 'Fe', 'Mg', 'Ca', 'Na', 'P']),
+]
+# 中文注释：Figure7a 仅调整横向展示顺序，让 Major elements 紧跟 LILE；不改变任何 SHAP 统计。
+PANEL_A_ELEMENT_GROUPS = [
+    ('LILE',       ['Rb', 'Ba', 'Sr', 'K']),
+    ('Major',      ['Si', 'Ti', 'Al', 'Fe', 'Mg', 'Ca', 'Na', 'P']),
+    ('HFSE',       ['Th', 'Nb', 'Ta', 'Zr', 'Hf']),
+    ('REE',        ['La', 'Ce', 'Pr', 'Nd', 'Sm', 'Eu', 'Gd',
+                    'Tb', 'Dy', 'Ho', 'Er', 'Yb', 'Lu', 'Y']),
+    ('Transition', ['V', 'Cr', 'Mn', 'Co', 'Ni']),
 ]
 GROUP_COLORS = {
     'LILE':       '#D98C00',   # 柔和橙
@@ -107,6 +137,8 @@ DIRECTION_CMAP = LinearSegmentedColormap.from_list(
     'blue_to_red', ['#2166AC', '#B2182B'])
 
 TECTONIC_ORDER = ['BAB', 'CA', 'CF', 'CR', 'IOA', 'IA', 'OI', 'OP', 'MOR']
+# 中文注释：Figure7a 专用 y 轴展示顺序；只影响热图行顺序，不改变 SHAP 统计。
+PANEL_A_TECTONIC_ORDER = ['CA', 'IA', 'IOA', 'BAB', 'MOR', 'OP', 'OI', 'CR', 'CF']
 TECTONIC_FULLNAME = {
     'BAB': 'Back-arc Basin',          'CA': 'Continental Arc',
     'CF': 'Continental Flood Basalt', 'CR': 'Continental Rift',
@@ -145,12 +177,14 @@ def _save(fig, output_dir, name):
     print(f'  已保存：{png}')
 
 
-def _ordered_classes(unique_labels):
+def _ordered_classes(unique_labels, tectonic_order=None):
     """按 TECTONIC_ORDER 返回 (short_codes, idx_into_merged_shap)。"""
+    if tectonic_order is None:
+        tectonic_order = TECTONIC_ORDER
     short_of = [LABEL_MAPPING.get(lbl, lbl) for lbl in unique_labels]
     short2pos = {s: i for i, s in enumerate(short_of)}
     ordered, idx = [], []
-    for code in TECTONIC_ORDER:
+    for code in tectonic_order:
         if code in short2pos:
             ordered.append(code)
             idx.append(short2pos[code])
@@ -204,28 +238,59 @@ def _resolve_model_path(model_path):
         f'请用 --model 指定正确的 .pth。')
 
 
-def _select_explain_samples_per_class(X_test_36, y_test, n_per_class):
-    """从测试集每个类别固定抽样，保证各构造环境参与 SHAP 的样本数更均衡。"""
+def _select_explain_samples_per_class(
+        X_test_36, y_test, unique_labels, n_per_class, class_limits=None,
+        feature_quantile_filters=None):
+    """按类别配额从测试集抽样，保证各构造环境参与 SHAP 的样本数更均衡。"""
+    class_limits = class_limits or {}
+    feature_quantile_filters = feature_quantile_filters or {}
     explain_idx = []
     for lbl in np.unique(y_test):
         lbl_idx = np.where(y_test == lbl)[0]
-        n_lbl = min(n_per_class, len(lbl_idx))
-        picked_idx = np.random.choice(lbl_idx, n_lbl, replace=False)
+        full_label = unique_labels[int(lbl)]
+        short_label = LABEL_MAPPING.get(full_label, full_label)
+        class_limit = class_limits.get(short_label, n_per_class)
+
+        candidate_idx = lbl_idx
+        filter_config = feature_quantile_filters.get(short_label)
+        filter_message = ''
+        if filter_config is not None:
+            feature_name, lower_q, upper_q = filter_config
+            feature_idx = ALL_FEATURES_COLS.index(feature_name)
+            class_values = X_test_36[lbl_idx, feature_idx]
+            lower_value, upper_value = np.quantile(
+                class_values, [lower_q, upper_q])
+            keep = (
+                (class_values >= lower_value)
+                & (class_values <= upper_value)
+            )
+            candidate_idx = lbl_idx[keep]
+            filter_message = (
+                f'，{feature_name} 保留 P{lower_q * 100:.0f}'
+                f'--P{upper_q * 100:.0f}，候选 {len(candidate_idx)}'
+            )
+
+        n_lbl = min(class_limit, len(candidate_idx))
+        picked_idx = np.random.choice(candidate_idx, n_lbl, replace=False)
         explain_idx.extend(picked_idx)
 
-        short_label = LABEL_MAPPING.get(lbl, lbl)
-        print(f'  {short_label}: 抽取 {n_lbl} / {len(lbl_idx)} 个测试样本')
+        print(f'  {short_label}: 抽取 {n_lbl} / {len(lbl_idx)} 个测试样本'
+              f'（上限 {class_limit}{filter_message}）')
 
     return X_test_36[explain_idx], explain_idx
 
 
-def compute_merged_shap(n_explain_per_class, n_background, batch_size, model_path):
-    X_train_36, y_train, X_test_36, y_test, unique_labels = \
-        load_data(TRAIN_FILE, TEST_FILE)
+def compute_merged_shap(
+        n_explain_per_class, n_background, batch_size, model_path,
+        class_limits=None, feature_quantile_filters=None):
+    # 中文注释：与正式 GeoDAN 一致开启缺失编码，load_data 返回 72 维 [数值|mask]。
+    X_train, y_train, X_test, y_test, unique_labels = load_data(
+        TRAIN_FILE, TEST_FILE, TRAIN_MASK_FILE, TEST_MASK_FILE)
     num_classes = len(unique_labels)
 
     model_path = _resolve_model_path(model_path)
-    model = ViT_Transformer_DualStream(num_classes=num_classes).to(base.device)
+    model = ViT_Transformer_DualStream(
+        num_classes=num_classes, use_missing_mask=USE_MISSING_MASK).to(base.device)
     state_dict = torch.load(model_path, map_location=base.device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -234,58 +299,119 @@ def compute_merged_shap(n_explain_per_class, n_background, batch_size, model_pat
     wrapped = TableInputWrapper(
         model, canonical_cols=ALL_FEATURES_COLS,
         img_cols=COLUMNS_IMG_ORDER, seq_cols=COLUMNS_ELECTRODE_ORDER,
+        use_missing_mask=USE_MISSING_MASK,
     ).to(base.device)
     wrapped.eval()
 
     n_background = min(n_background, len(y_train))
     np.random.seed(RANDOM_SEED)
     print(f'分层采样背景数据 {n_background} 个 ...')
-    background_tensor = select_background(X_train_36, y_train, n_background)
+    background_tensor = select_background(X_train, y_train, n_background)
 
-    # 待解释样本每类固定抽样，避免类别不平衡影响各类 SHAP 对比。
+    # 中文注释：按类别配额抽样，降低大类主导全局 SHAP 汇总的程度。
     np.random.seed(RANDOM_SEED)
-    print(f'每类抽取待解释测试样本，目标数量 {n_explain_per_class} 个 ...')
-    X_exp_36, explain_idx = _select_explain_samples_per_class(
-        X_test_36, y_test, n_explain_per_class)
+    print(f'按类别配额抽取待解释测试样本，默认上限 {n_explain_per_class} 个 ...')
+    X_exp, explain_idx = _select_explain_samples_per_class(
+        X_test, y_test, unique_labels, n_explain_per_class, class_limits,
+        feature_quantile_filters)
     print(f'待解释样本：{len(explain_idx)} 个（来自测试集）')
 
     shap_values = compute_shap_values(
-        wrapped, background_tensor, X_exp_36,
+        wrapped, background_tensor, X_exp,
         n_explain=len(explain_idx), batch_size=batch_size)
-    merged_shap = np.array(shap_values)            # (n_classes, n_samples, 36)
-    return merged_shap, X_exp_36, unique_labels
+    merged_full = np.array(shap_values)            # (n_classes, n_samples, F)
+
+    # 中文注释：开启缺失编码时 F=72=[数值|mask]，绘图只取数值通道的 36 维归因；
+    #           X_exp 同步切到数值通道，供 (b)/(d) 按特征值上色。
+    n_feat = len(ALL_FEATURES_COLS)
+    if merged_full.shape[2] == 2 * n_feat:
+        merged_shap = merged_full[:, :, :n_feat]
+        X_exp_36 = X_exp[:, :n_feat]
+    else:
+        merged_shap = merged_full
+        X_exp_36 = X_exp
+    explain_idx = np.asarray(explain_idx)
+    y_exp = y_test[explain_idx]
+    return merged_shap, X_exp_36, unique_labels, explain_idx, y_exp
+
+
+def load_cached_shap(output_dir, cache_n):
+    """读取已有 SHAP 缓存，并用 explain_idx 还原每个解释样本的真实类别。"""
+    shap_path = os.path.join(output_dir, f'shap_merged_n{cache_n}.npy')
+    x_path = os.path.join(output_dir, f'X_exp_36_n{cache_n}.npy')
+    idx_path = os.path.join(output_dir, f'explain_idx_n{cache_n}.npy')
+    if not (os.path.exists(shap_path) and os.path.exists(x_path)
+            and os.path.exists(idx_path)):
+        raise FileNotFoundError(
+            f'缓存不完整，请检查：{shap_path} / {x_path} / {idx_path}')
+
+    merged_shap = np.load(shap_path)
+    X_exp_36 = np.load(x_path)
+    explain_idx = np.load(idx_path)
+    # 中文注释：只为拿到 unique_labels 和测试集标签，不重新计算 SHAP。
+    _, _, _, y_test, unique_labels = load_data(
+        TRAIN_FILE, TEST_FILE, TRAIN_MASK_FILE, TEST_MASK_FILE)
+    y_exp = y_test[explain_idx]
+    print(f'已读取 SHAP 缓存：{shap_path}')
+    return merged_shap, X_exp_36, unique_labels, explain_idx, y_exp
 
 
 # ══════════════════════════════════════════════════════════════
-# ④  (a) 单独：mean(|SHAP|) 热图
+# ④  (a) 单独：真实类别样本 median(|SHAP|) 热图
 # ══════════════════════════════════════════════════════════════
-def plot_panel_a(merged_shap, unique_labels, output_dir):
+def _class_sample_mask(y_exp, class_idx, n_samples):
+    """返回某输出类别对应的真实样本掩码；无 y_exp 时退回全样本。"""
+    if y_exp is None:
+        return np.ones(n_samples, dtype=bool)
+    return np.asarray(y_exp) == class_idx
+
+
+def _class_feature_importance(merged_shap, class_idx, y_exp=None):
+    """用该真实类别样本计算某输出类别的稳健特征重要性。"""
+    mask = _class_sample_mask(y_exp, class_idx, merged_shap.shape[1])
+    if not mask.any():
+        return np.zeros(merged_shap.shape[2])
+    return np.median(np.abs(merged_shap[class_idx, mask, :]), axis=0)
+
+
+def plot_panel_a(merged_shap, unique_labels, output_dir, y_exp=None):
     _set_pub_rcparams()
     display_names = [COL_DISPLAY.get(f, f) for f in ALL_FEATURES_COLS]
     sym2idx = {s: i for i, s in enumerate(display_names)}
-    ordered_codes, cls_idx = _ordered_classes(unique_labels)
+    ordered_codes, cls_idx = _ordered_classes(unique_labels, PANEL_A_TECTONIC_ORDER)
 
-    flat_syms = [s for _, syms in ELEMENT_GROUPS for s in syms if s in sym2idx]
+    flat_syms = [s for _, syms in PANEL_A_ELEMENT_GROUPS
+                 for s in syms if s in sym2idx]
     col_order = [sym2idx[s] for s in flat_syms]
     col_groups = [SYM2GROUP[s] for s in flat_syms]
-    data = np.abs(merged_shap).mean(axis=1)[cls_idx][:, col_order]
+    data = np.vstack([
+        _class_feature_importance(merged_shap, c, y_exp)
+        for c in cls_idx
+    ])[:, col_order]
 
     fig, ax = plt.subplots(figsize=(8.2, 4.4), dpi=1200)
     im = ax.imshow(data, aspect='auto', cmap='YlOrRd')
     ax.set_xticks(range(len(flat_syms)))
-    ax.set_xticklabels(flat_syms, fontsize=8, rotation=0, fontweight='bold')
+    ax.set_xticklabels(flat_syms, fontsize=8.5, rotation=0, fontweight='bold')
     ax.set_yticks(range(len(ordered_codes)))
-    ax.set_yticklabels(ordered_codes, fontsize=10, fontweight='bold')
-    ax.set_ylabel('Tectonic settings', fontsize=10, labelpad=4)
+    ax.set_yticklabels(ordered_codes, fontsize=10, fontweight='semibold')
+    # 中文注释：缩小左侧类别标签和热图主体的距离，同时保持半粗体出版风格。
+    ax.tick_params(axis='y', pad=0)
+    ax.set_ylabel('Tectonic settings', fontsize=10, labelpad=2,
+                  fontweight='semibold')
     ax.tick_params(axis='x', length=0)
-    # ax.set_title('(a)  SHAP importance heatmap (mean |SHAP value|)',
+    # ax.set_title('(a)  True-class SHAP importance heatmap (median |SHAP value|)',
     #              fontsize=12, loc='left', pad=8)
     cb = fig.colorbar(im, ax=ax, fraction=0.016, pad=0.018, shrink=0.85)
-    cb.set_label('mean(|SHAP|)', fontsize=9, labelpad=3)
+    cb.set_label('median(|SHAP|)', fontsize=10, labelpad=5,
+                 fontweight='semibold')
     cb.ax.tick_params(labelsize=8, length=2)
+    # 中文注释：色带刻度数字需要逐个设置字重，tick_params 不能控制 fontweight。
+    for tick_label in cb.ax.get_yticklabels():
+        tick_label.set_fontweight('semibold')
     cb.outline.set_linewidth(0.6)
-    _draw_group_bars(ax, col_groups, y_line=-0.14, y_text=-0.24,
-                     lw=3.6, fontsize=9, text_color='#111111',
+    _draw_group_bars(ax, col_groups, y_line=-0.11, y_text=-0.20,
+                     lw=3.6, fontsize=10, text_color='#111111',
                      fontweight='bold')
     fig.subplots_adjust(left=0.055, right=0.995, top=0.9, bottom=0.24)
     _save(fig, output_dir, 'Figure7a_heatmap')
@@ -294,11 +420,11 @@ def plot_panel_a(merged_shap, unique_labels, output_dir):
 # ══════════════════════════════════════════════════════════════
 # ⑤  (b) 单独：Top-15 方向热图
 # ══════════════════════════════════════════════════════════════
-def plot_panel_b(merged_shap, X_exp_36, unique_labels, output_dir):
+def plot_panel_b(merged_shap, X_exp_36, unique_labels, output_dir, y_exp=None):
     _set_pub_rcparams()
     display_names = [COL_DISPLAY.get(f, f) for f in ALL_FEATURES_COLS]
     ordered_codes, cls_idx = _ordered_classes(unique_labels)
-    global_imp = np.abs(merged_shap).mean(axis=(0, 1))
+    global_imp, _ = _ranking_importance(merged_shap, y_exp)
 
     top15 = np.argsort(global_imp)[::-1][:15]
     top15 = sorted(top15, key=lambda j: (GROUP_RANK[SYM2GROUP[display_names[j]]],
@@ -306,11 +432,14 @@ def plot_panel_b(merged_shap, X_exp_36, unique_labels, output_dir):
     top15_syms = [display_names[j] for j in top15]
     direction = np.zeros((len(ordered_codes), len(top15)))
     for jj, feat_j in enumerate(top15):
-        fv = X_exp_36[:, feat_j]
-        q25, q75 = np.percentile(fv, 25), np.percentile(fv, 75)
-        high, low = fv >= q75, fv <= q25
         for ci, c in enumerate(cls_idx):
-            sv = merged_shap[c, :, feat_j]
+            mask = _class_sample_mask(y_exp, c, merged_shap.shape[1])
+            fv = X_exp_36[mask, feat_j]
+            sv = merged_shap[c, mask, feat_j]
+            if len(fv) == 0:
+                continue
+            q25, q75 = np.percentile(fv, 25), np.percentile(fv, 75)
+            high, low = fv >= q75, fv <= q25
             hi = sv[high].mean() if high.any() else 0.0
             lo = sv[low].mean() if low.any() else 0.0
             direction[ci, jj] = hi - lo
@@ -321,7 +450,7 @@ def plot_panel_b(merged_shap, X_exp_36, unique_labels, output_dir):
     im = ax.imshow(direction_n, aspect='auto',
                    vmin=-1, vmax=1)
     ax.set_xticks(range(len(top15_syms)))
-    ax.set_xticklabels(top15_syms, fontsize=9, rotation=0)
+    ax.set_xticklabels(top15_syms, fontsize=10, rotation=0)
     ax.set_yticks(range(len(ordered_codes)))
     ax.set_yticklabels(ordered_codes, fontsize=10, fontweight='bold')
     ax.tick_params(axis='x', length=0)
@@ -337,12 +466,28 @@ def plot_panel_b(merged_shap, X_exp_36, unique_labels, output_dir):
 
 
 # ══════════════════════════════════════════════════════════════
-# ⑥  (c) 单独：全局 Top-20 重要性排名（按分组着色）
+# ⑥  (c) 单独：真实类别输出 Top-20 稳健重要性排名（按分组着色）
 # ══════════════════════════════════════════════════════════════
-def plot_panel_c(merged_shap, output_dir):
+def _ranking_importance(merged_shap, y_exp=None):
+    """返回 Figure7c 使用的重要性向量和横轴标签。"""
+    abs_shap = np.abs(merged_shap)
+    if RANKING_IMPORTANCE_STAT == 'true_class_median':
+        if y_exp is None:
+            raise ValueError('true_class_median 需要 y_exp 真实类别标签')
+        true_class_abs = np.asarray([
+            abs_shap[int(y_exp[i]), i, :]
+            for i in range(len(y_exp))
+        ])
+        return np.median(true_class_abs, axis=0), 'median(|SHAP|)'
+    if RANKING_IMPORTANCE_STAT == 'median_all_outputs':
+        return np.median(abs_shap, axis=(0, 1)), 'median(|SHAP|)'
+    return abs_shap.mean(axis=(0, 1)), 'mean(|SHAP|)'
+
+
+def plot_panel_c(merged_shap, output_dir, y_exp=None):
     _set_pub_rcparams()
     display_names = [COL_DISPLAY.get(f, f) for f in ALL_FEATURES_COLS]
-    global_imp = np.abs(merged_shap).mean(axis=(0, 1))
+    global_imp, x_label = _ranking_importance(merged_shap, y_exp)
 
     top20 = np.argsort(global_imp)[::-1][:20]
     syms = [display_names[j] for j in top20]
@@ -356,17 +501,19 @@ def plot_panel_c(merged_shap, output_dir):
     # x 轴右边界调紧，减少柱子右侧空白；倍率太小会裁掉最长柱。
     x_axis_max = vals.max() * 1.03
 
-    fig, ax = plt.subplots(figsize=(3.6, 3.2), dpi=1200)
+    # 中文注释：略微增加 Figure7c 高度，避免 Top-20 排名行之间过于拥挤。
+    fig, ax = plt.subplots(figsize=(3.6, 3.5), dpi=1200)
     ax.barh(y, vals, color=cols, edgecolor='none',
             height=0.68, zorder=3)
     ax.set_yticks(y)
     ax.set_yticklabels(syms, fontsize=10, fontweight='bold')
     ax.invert_yaxis()
-    ax.set_xlabel('mean(|SHAP|)', fontsize=10, labelpad=3)
+    ax.set_xlabel(x_label, fontsize=10, labelpad=3,
+                  fontweight='semibold')
     ax.set_xlim(0, x_axis_max)
-    # ax.set_title('(c)  Global SHAP importance ranking', fontsize=12,
+    # ax.set_title('(c)  True-class robust SHAP importance ranking', fontsize=12,
     #              loc='left', pad=8)
-    ax.tick_params(axis='both', labelsize=9)
+    ax.tick_params(axis='both', labelsize=10)
     ax.tick_params(axis='y', length=3.2, width=0.7, color='#333333')
     ax.tick_params(axis='x', length=3.2, width=0.7, color='#333333')
     _bold_ticklabels(ax)
@@ -396,12 +543,12 @@ def plot_panel_c(merged_shap, output_dir):
     # legend.get_title().set_fontweight('bold')
     # for text in legend.get_texts():
     #     text.set_fontweight('bold')
-    fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.04)
+    fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.08)
     _save(fig, output_dir, 'Figure7c_ranking')
 
 
 # ══════════════════════════════════════════════════════════════
-# ⑦  (d) 各构造环境 Top-8 蜂窝图（单独保存）
+# ⑦  (d) 各构造环境真实类别样本 Top-8 蜂窝图（单独保存）
 # ══════════════════════════════════════════════════════════════
 def _beeswarm_offsets(x_values, bin_count=60, step=0.032, max_width=0.40):
     """按 SHAP 值分箱生成上下交错偏移，画出更接近 SHAP 原生风格的蜂窝点。"""
@@ -487,14 +634,19 @@ def _scatter_beeswarm(shap_vals, feat_vals, feature_names, ax):
         ax.spines[spine].set_visible(False)
 
 
-def plot_beeswarm_top8(merged_shap, X_exp_36, unique_labels, output_dir):
+def plot_beeswarm_top8(merged_shap, X_exp_36, unique_labels, output_dir, y_exp=None):
+    """每类只用真实属于该类的样本；Top8 按 median(|SHAP|) 排序，散点保留原始 SHAP 分布。"""
     display_names = [COL_DISPLAY.get(f, f) for f in ALL_FEATURES_COLS]
     feat_arr = np.asarray(X_exp_36)
     ordered_codes, cls_idx = _ordered_classes(unique_labels)
     for code, c in zip(ordered_codes, cls_idx):
-        imp = np.abs(merged_shap[c]).mean(axis=0)
+        mask = _class_sample_mask(y_exp, c, merged_shap.shape[1])
+        if not mask.any():
+            print(f'  [跳过] {code}: 没有对应真实类别样本')
+            continue
+        imp = _class_feature_importance(merged_shap, c, y_exp)
         top8 = np.argsort(imp)[::-1][:8]
-        sv8, fv8 = merged_shap[c][:, top8], feat_arr[:, top8]
+        sv8, fv8 = merged_shap[c][mask][:, top8], feat_arr[mask][:, top8]
         names8 = [display_names[j] for j in top8]
 
         np.random.seed(42)
@@ -513,26 +665,38 @@ def plot_beeswarm_top8(merged_shap, X_exp_36, unique_labels, output_dir):
 def main():
     os.makedirs(OUTPUT_PANEL_DIR, exist_ok=True)
     print(f'输出目录：{OUTPUT_PANEL_DIR}')
-    print(f'样本设置：n_explain_per_class={N_EXPLAIN_PER_CLASS}  n_background={N_BACKGROUND}  '
+    print(f'样本设置：默认类别上限={N_EXPLAIN_PER_CLASS}  '
+          f'类别覆盖={EXPLAIN_CLASS_LIMITS}  n_background={N_BACKGROUND}  '
           f'batch_size={BATCH_SIZE}\n')
+    print(f"特征分位筛选：{EXPLAIN_FEATURE_QUANTILE_FILTERS or '无'}\n")
+    print(f'构造环境子图口径：真实类别样本 + median(|SHAP|)\n')
 
-    merged_shap, X_exp_36, unique_labels = compute_merged_shap(
-        N_EXPLAIN_PER_CLASS, N_BACKGROUND, BATCH_SIZE, MODEL_WEIGHT_PATH)
+    if USE_CACHED_SHAP:
+        merged_shap, X_exp_36, unique_labels, explain_idx, y_exp = load_cached_shap(
+            OUTPUT_PANEL_DIR, CACHED_SHAP_N)
+    else:
+        merged_shap, X_exp_36, unique_labels, explain_idx, y_exp = compute_merged_shap(
+            N_EXPLAIN_PER_CLASS, N_BACKGROUND, BATCH_SIZE, MODEL_WEIGHT_PATH,
+            EXPLAIN_CLASS_LIMITS, EXPLAIN_FEATURE_QUANTILE_FILTERS)
 
-    # 保存本次（小样本）结果，文件名带样本数，绝不覆盖原 shap_merged.npy
-    np.save(os.path.join(OUTPUT_PANEL_DIR, f'shap_merged_n{merged_shap.shape[1]}.npy'),
-            merged_shap)
-    np.save(os.path.join(OUTPUT_PANEL_DIR, f'X_exp_36_n{X_exp_36.shape[0]}.npy'), X_exp_36)
+        # 保存本次（小样本）结果，文件名带样本数，绝不覆盖原 shap_merged.npy
+        np.save(os.path.join(OUTPUT_PANEL_DIR, f'shap_merged_n{merged_shap.shape[1]}.npy'),
+                merged_shap)
+        np.save(os.path.join(OUTPUT_PANEL_DIR, f'X_exp_36_n{X_exp_36.shape[0]}.npy'), X_exp_36)
+        # 中文注释：保存原测试集行号，确保条件抽样结果可以逐样本追溯。
+        np.save(os.path.join(OUTPUT_PANEL_DIR, f'explain_idx_n{len(explain_idx)}.npy'),
+                explain_idx)
 
     print('\n绘制 (a) 热图 ...')
-    plot_panel_a(merged_shap, unique_labels, OUTPUT_PANEL_DIR)
+    plot_panel_a(merged_shap, unique_labels, OUTPUT_PANEL_DIR, y_exp)
     print('绘制 (b) 方向热图 ...')
-    plot_panel_b(merged_shap, X_exp_36, unique_labels, OUTPUT_PANEL_DIR)
+    plot_panel_b(merged_shap, X_exp_36, unique_labels, OUTPUT_PANEL_DIR, y_exp)
     print('绘制 (c) 重要性排名 ...')
-    plot_panel_c(merged_shap, OUTPUT_PANEL_DIR)
+    plot_panel_c(merged_shap, OUTPUT_PANEL_DIR, y_exp)
     if DRAW_BEESWARM:
         print('绘制 (d) 各构造环境 Top-8 蜂窝图 ...')
-        plot_beeswarm_top8(merged_shap, X_exp_36, unique_labels, OUTPUT_PANEL_DIR)
+        plot_beeswarm_top8(merged_shap, X_exp_36, unique_labels,
+                           OUTPUT_PANEL_DIR, y_exp)
 
     print(f'\n完成。所有子图已分别保存至：{OUTPUT_PANEL_DIR}')
 

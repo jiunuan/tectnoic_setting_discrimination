@@ -8,29 +8,25 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.paths import COMBINED_CSV, TRAIN_IMPUTED_CSV, TEST_IMPUTED_CSV, FIGURES_DIR
+from config.paths import TRAIN_RAW_CSV, COMBINED_CSV, FIGURES_DIR
 
 
-# 默认数据源：
-# "raw" 表示插值前的清洗后观测数据；
-# "imputed" 表示训练集和测试集合并后的插值数据，即模型使用的特征矩阵。
-DATA_MODE = "raw"
+# 默认展示最新版训练流程中“插补前”的训练集实测数据。
+# 箱线图用于描述真实观测分布，不使用随机森林插补值、SMOTE 合成值或归一化值。
+DATA_SCOPE = "train"
 
-# 异常值过滤阈值，仿照 data_interpolation/Outlier_Detection_Basalt.py 中的 IQR threshold=6。
-OUTLIER_IQR_THRESHOLD = 4.5
+# 数据路径来自 config/paths.py：train=切分后训练集（插补前），full=合并总表。
+DATA_PATHS = {
+    "train": Path(str(TRAIN_RAW_CSV)),
+    "full": Path(str(COMBINED_CSV)),
+}
 
-# 路径统一由 config/paths.py 管理。
-# 插值前的清洗后完整数据（当前默认 --mode raw 画的就是这个文件）。
-RAW_DATA_PATH = COMBINED_CSV
-
-# 插值后的训练集和测试集；--mode imputed 时绘图会自动合并。
-IMPUTED_DATA_PATHS = [
-    TRAIN_IMPUTED_CSV,
-    TEST_IMPUTED_CSV,
-]
-
-# 图片输出目录。
-OUTPUT_DIR = FIGURES_DIR / "selected_elements"
+# 输出统一放在 data/figures/selected_elements/ 下。
+_BOX_OUTPUT_DIR = FIGURES_DIR / "selected_elements"
+OUTPUT_PATHS = {
+    "train": _BOX_OUTPUT_DIR / "selected_element_boxplots_train_observed.png",
+    "full": _BOX_OUTPUT_DIR / "selected_element_boxplots_full_observed.png",
+}
 
 # 需要绘制的元素列名及其图中显示名称（按面板 a–f 顺序排列）。
 ELEMENT_LABELS = {
@@ -53,6 +49,16 @@ ELEMENT_SCALES = {
     "DY(PPM)": ("linear", None),
     "TIO2(WT%)": ("linear", None),
 }
+
+# Ba、Th、Nb 含有极少数超高值，若直接用最大值确定上界会产生大片空白。
+# 仅裁剪显示范围，不删除数据；箱体统计量仍基于全部有效实测值。
+LOG_Y_LIMIT_QUANTILES = {
+    "BA(PPM)": 0.998,
+    "TH(PPM)": 0.998,
+    "NB(PPM)": 0.998,
+}
+# 对数轴顶部统一增加 0.18 个数量级，避免最高散点紧贴面板边界。
+LOG_Y_LIMIT_PADDING_DECADES = 0.28
 
 # Dy 和 TiO2 的少数高值会把线性轴上限撑得偏高，这里只收紧主分布展示范围。
 LINEAR_Y_LIMIT_QUANTILES = {
@@ -111,21 +117,9 @@ BOX_ALPHA = 0.85          # 箱体填充透明度
 JITTER_SEED = 0           # 抽样与抖动的随机种子，保证可复现
 
 
-def load_dataset(mode: str) -> pd.DataFrame:
-    """按指定模式读取数据。"""
-    if mode == "raw":
-        return pd.read_csv(RAW_DATA_PATH, low_memory=False)
-
-    if mode == "imputed":
-        frames = []
-        for path in IMPUTED_DATA_PATHS:
-            frame = pd.read_csv(path, low_memory=False)
-            # 保留数据来自训练集还是测试集的信息，后续如需检查可直接使用。
-            frame["DATA_SPLIT"] = "test" if "test" in path.name else "train"
-            frames.append(frame)
-        return pd.concat(frames, ignore_index=True)
-
-    raise ValueError('DATA_MODE must be either "raw" or "imputed".')
+def load_dataset(scope: str) -> pd.DataFrame:
+    """读取最新版流程中插补前的训练集或划分前总表。"""
+    return pd.read_csv(DATA_PATHS[scope], low_memory=False)
 
 
 def prepare_dataset(df: pd.DataFrame) -> pd.DataFrame:
@@ -148,9 +142,10 @@ def prepare_dataset(df: pd.DataFrame) -> pd.DataFrame:
     return plot_df
 
 
-def print_dataset_summary(df: pd.DataFrame, mode: str) -> None:
+def print_dataset_summary(df: pd.DataFrame, scope: str) -> None:
     """在终端输出样本量、类别数量和绘图元素缺失值，方便论文作图时核对。"""
-    print(f"Data mode: {mode}")
+    print(f"Data scope: {scope}")
+    print("Value source: observed values before imputation")
     print(f"Rows: {len(df)}")
     print("\nClass counts:")
     print(df["TECTONIC SETTING"].value_counts().reindex(TECTONIC_ORDER).to_string())
@@ -158,66 +153,18 @@ def print_dataset_summary(df: pd.DataFrame, mode: str) -> None:
     print(df[list(ELEMENT_LABELS.keys())].isna().sum().to_string())
 
 
-def iqr_based_outlier(data: pd.Series, threshold: float) -> pd.Series:
-    """使用 IQR 方法识别单个元素列中的异常值。"""
-    valid_data = data.dropna()
-    outliers = pd.Series(False, index=data.index)
-    if valid_data.empty:
-        return outliers
-
-    q1 = valid_data.quantile(0.25)
-    q3 = valid_data.quantile(0.75)
-    iqr = q3 - q1
-    lower_bound = q1 - iqr * threshold
-    upper_bound = q3 + iqr * threshold
-    outliers.loc[valid_data.index] = (valid_data < lower_bound) | (valid_data > upper_bound)
-    return outliers
-
-
-def remove_iqr_outliers_by_setting(
-    df: pd.DataFrame,
-    elements: list[str],
-    threshold: float = OUTLIER_IQR_THRESHOLD,
-) -> pd.DataFrame:
-    """按构造环境分组，只基于指定 6 个元素删除 IQR 异常值。"""
-    outlier_mask = pd.Series(False, index=df.index)
-
-    for setting, group in df.groupby("TECTONIC SETTING"):
-        group_outliers = pd.Series(False, index=group.index)
-        for element in elements:
-            group_outliers |= iqr_based_outlier(group[element], threshold)
-        outlier_mask.loc[group.index] = group_outliers
-
-    removed_counts = (
-        df.loc[outlier_mask, "TECTONIC SETTING"]
-        .value_counts()
-        .reindex(TECTONIC_ORDER, fill_value=0)
-    )
-    print(f"\nIQR outlier threshold: {threshold}")
-    print(f"Rows removed by IQR outlier filtering: {int(outlier_mask.sum())}")
-    print("Removed rows by tectonic setting:")
-    print(removed_counts.to_string())
-
-    return df.loc[~outlier_mask].copy()
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="按构造环境绘制 Ba、Th、Nb、La、Dy、TiO2 箱型图。"
     )
     parser.add_argument(
-        "--mode",
-        choices=["raw", "imputed"],
-        default=DATA_MODE,
+        "--scope",
+        choices=["train", "full"],
+        default=DATA_SCOPE,
         help=(
-            "raw：插值前的清洗后观测数据；"
-            "imputed：训练集和测试集合并后的插值数据。"
+            "train：最新版训练流程中插补前的训练集实测值；"
+            "full：划分训练集/测试集之前的完整实测总表。"
         ),
-    )
-    parser.add_argument(
-        "--keep-outliers",
-        action="store_true",
-        help="不执行 IQR 异常值过滤，直接使用读取后的数据绘图。",
     )
     return parser.parse_args()
 
@@ -261,7 +208,7 @@ def _style_axis(ax: plt.Axes) -> None:
 
 
 def create_selected_element_boxplots(
-    df: pd.DataFrame, output_dir: Path, mode: str
+    df: pd.DataFrame, output_path: Path
 ) -> Path:
     """生成 2×3 的组合箱线图（叠加 jitter 散点），保存为高分辨率 PNG。"""
     # 清爽的无衬线字体；mathtext 也用无衬线，使面板标号与 TiO2 下标风格统一。
@@ -343,8 +290,14 @@ def create_selected_element_boxplots(
             # 少数低于须线的离群低散点不显示，与 showfliers=False 行为一致。
             whisker_ydata = np.concatenate([w.get_ydata() for w in box["whiskers"]])
             low = whisker_ydata[whisker_ydata > 0].min()
-            high = all_values.max()
-            ax.set_ylim(low / 1.3, high * 1.3)
+            if column in LOG_Y_LIMIT_QUANTILES:
+                high = np.nanquantile(
+                    all_values, LOG_Y_LIMIT_QUANTILES[column]
+                )
+                high *= 10 ** LOG_Y_LIMIT_PADDING_DECADES
+            else:
+                high = all_values.max() * 1.3
+            ax.set_ylim(low / 1.3, high)
             ax.yaxis.set_major_locator(mticker.FixedLocator(ticks))
             # 用 FuncFormatter 按刻度值格式化：范围外刻度被裁剪时标签也不会错位。
             ax.yaxis.set_major_formatter(
@@ -387,25 +340,22 @@ def create_selected_element_boxplots(
 
     # 共享坐标轴标题。
     fig.supxlabel("Tectonic setting", fontsize=12, color="#222222", fontweight="semibold")
-    fig.supylabel("Concentration", fontsize=12, color="#222222", fontweight="semibold")
+    fig.supylabel("Concentration", x=0.000, fontsize=12, color="#222222", fontweight="semibold")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_png = output_dir / f"selected_element_boxplots_{mode}.png"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     # 仅导出高分辨率 PNG（600 dpi），用于论文主文图排版。
-    fig.savefig(output_png, dpi=600, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, dpi=600, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    return output_png
+    return output_path
 
 
 if __name__ == "__main__":
     # 命令示例：
-    # python data_analysis/selected_element_boxplots.py --mode raw
-    # python data_analysis/selected_element_boxplots.py --mode imputed
+    # python data_analysis/selected_element_boxplots.py --scope train
+    # python data_analysis/selected_element_boxplots.py --scope full
     args = parse_args()
-    dataset = load_dataset(args.mode)
+    dataset = load_dataset(args.scope)
     dataset = prepare_dataset(dataset)
-    if not args.keep_outliers:
-        dataset = remove_iqr_outliers_by_setting(dataset, list(ELEMENT_LABELS.keys()))
-    print_dataset_summary(dataset, args.mode)
-    output_path = create_selected_element_boxplots(dataset, OUTPUT_DIR, args.mode)
+    print_dataset_summary(dataset, args.scope)
+    output_path = create_selected_element_boxplots(dataset, OUTPUT_PATHS[args.scope])
     print(f"\nBoxplot saved to: {output_path}")
